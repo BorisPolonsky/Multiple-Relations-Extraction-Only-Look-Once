@@ -209,21 +209,18 @@ class SKE_2019_Subject_Relation_Object_extraction_Processor(DataProcessor):
         self.language = "zh"
 
     def get_examples(self, data_dir):
-        with open(os.path.join(data_dir, "token_in.txt"), "r", encoding='utf-8') as token_in_f:
-            with open(os.path.join(data_dir, "labeling_out.txt"), "r", encoding='utf-8') as labeling_out_f:
-                with open(os.path.join(data_dir, "predicate_value_out.txt"), "r",
-                          encoding='utf-8') as predicate_value_out_f:
-                    with open(os.path.join(data_dir, "predicate_location_out.txt"), "r",
-                              encoding='utf-8') as predicate_location_out_f:
-                        token_in_list = [seq.replace("\n", '') for seq in token_in_f.readlines()]
-                        token_label_out_list = [seq.replace("\n", '') for seq in labeling_out_f.readlines()]
-                        predicate_value_out_list = [eval(seq.replace("\n", '')) for seq in
-                                                    predicate_value_out_f.readlines()]
-                        predicate_location_out_list = [eval(seq.replace("\n", '')) for seq in
-                                                       predicate_location_out_f.readlines()]
-                        examples = list(zip(token_in_list, token_label_out_list, predicate_value_out_list,
-                                            predicate_location_out_list))
-                        return examples
+        with open(os.path.join(data_dir, "token_in.txt"), "r", encoding='utf-8') as token_in_f,\
+            open(os.path.join(data_dir, "labeling_out.txt"), "r", encoding='utf-8') as labeling_out_f, \
+            open(os.path.join(data_dir, "predicate_value_out.txt"), "r", encoding='utf-8') as predicate_value_out_f,\
+            open(os.path.join(data_dir, "predicate_location_out.txt"), "r", encoding='utf-8') as predicate_location_out_f:
+            token_in_list = [seq.replace("\n", '') for seq in token_in_f]
+            token_label_out_list = [seq.replace("\n", '') for seq in labeling_out_f]
+            predicate_value_out_list = [eval(seq.replace("\n", '')) for seq in
+                                        predicate_value_out_f]
+            predicate_location_out_list = [eval(seq.replace("\n", '')) for seq in predicate_location_out_f]
+            examples = list(zip(token_in_list, token_label_out_list, predicate_value_out_list,
+                                predicate_location_out_list))
+            return examples
 
     def get_train_examples(self, data_dir):
         return self._create_example(self.get_examples(os.path.join(data_dir, "train")), "train")
@@ -280,7 +277,7 @@ class SKE_2019_Subject_Relation_Object_extraction_Processor(DataProcessor):
 
 
 def convert_single_example(ex_index, example, token_label_list, predicate_label_list, max_seq_length,
-                           tokenizer):
+                           tokenizer, num_predicate_label):
     """Converts a single `InputExample` into a single `InputFeatures`."""
     if isinstance(example, PaddingInputExample):
         return InputFeatures(
@@ -288,7 +285,7 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
             input_mask=[0] * max_seq_length,
             segment_ids=[0] * max_seq_length,
             token_label_ids=[0] * max_seq_length,
-            predicate_matrix_ids=[0] * (max_seq_length * max_seq_length),
+            predicate_matrix_ids=((), ()),
             is_real_example=False)
 
     token_label_map = {}
@@ -317,9 +314,8 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
         predicate_value_list = [["N"] for _ in range(len(token_label))]
         predicate_location_list = [[i] for i in range(len(token_label))]
 
-    predicate_matrix_ids = _get_multiple_predicate_matrix(predicate_label_map, predicate_value_list,
-                                                          predicate_location_list, max_seq_length)
-
+    predicate_matrix_ids = _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list,
+                                                        predicate_location_list, max_seq_length)
     tokens = []
     token_label_ids = []
     segment_ids = []
@@ -357,7 +353,7 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
 
     if ex_index < 5:
         tf.logging.info("*** Example ***")
-        tf.logging.info("guid: %s" % (example.guid))
+        tf.logging.info("guid: %s" % example.guid)
         tf.logging.info("tokens: %s" % " ".join([str(x) for x in tokens]))
         tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
@@ -377,17 +373,35 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
 
 
 def _get_multiple_predicate_matrix(predicate_label_map, predicate_value_list, predicate_location_list, max_seq_length):
-    predicate_matrix = np.zeros((max_seq_length, max_seq_length), dtype=np.int32)
-    for xi, predicate_value in enumerate(predicate_value_list):
-        location_i = xi
-        if "N" in predicate_value:
-            continue
-        for xj, value in enumerate(predicate_value):
-            location_j = predicate_location_list[xi][xj]
+    num_label = len(predicate_label_map)
+    predicate_matrix = np.zeros((max_seq_length, max_seq_length, num_label), dtype=np.float32)
+    for location_i, (predicate_values, predicate_location) in enumerate(zip(predicate_value_list, predicate_location_list)):
+        predicate_value_ids = list(map(lambda x: predicate_label_map[x], predicate_values))
+        assert len(predicate_value_ids) == len(predicate_location)
+        # keep value_ids sorted as required by sparse matrix indices
+        for (value_id, location_j) in sorted(zip(predicate_value_ids, predicate_location), key=lambda pair: pair[0]):
+            if location_i < max_seq_length and location_j < max_seq_length:
+                predicate_matrix[location_i, location_j, value_id] = 1.
+            else:
+                pass
+    return predicate_matrix
+
+
+def _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list, predicate_location_list, max_seq_length):
+    idx_val_pairs = []
+    unique_idx_val_pairs = set()
+    for location_i, (predicate_values, predicate_location) in enumerate(zip(predicate_value_list, predicate_location_list)):
+        for (value, location_j) in zip(predicate_values, predicate_location):
             value_id = predicate_label_map[value]
             if location_i < max_seq_length and location_j < max_seq_length:
-                predicate_matrix[location_i, location_j] = value_id
-    return predicate_matrix
+                idx_val_pair = ((location_i, location_j, value_id), 1.)
+                if idx_val_pair not in unique_idx_val_pairs:
+                    idx_val_pairs.append(idx_val_pair)
+                    unique_idx_val_pairs.add(idx_val_pair)
+            else:
+                pass
+    indices, values = zip(*idx_val_pairs)
+    return indices, values
 
 
 def file_based_convert_examples_to_features(
@@ -401,16 +415,14 @@ def file_based_convert_examples_to_features(
             tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
 
         feature = convert_single_example(ex_index, example, token_label_list, predicate_label_list,
-                                         max_seq_length, tokenizer)
+                                         max_seq_length, tokenizer, len(predicate_label_list))
 
         def create_int_feature(values):
             f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
             return f
 
-        def create_int_matrix_feature(matrix_ids):
-            list_ids = matrix_ids.flatten()
-            list_ids = list_ids.tolist()
-            f = tf.train.Feature(int64_list=tf.train.Int64List(value=list_ids))
+        def create_float_feature(values):
+            f = tf.train.Feature(float_list=tf.train.FloatList(value=list(values)))
             return f
 
         features = collections.OrderedDict()
@@ -418,15 +430,20 @@ def file_based_convert_examples_to_features(
         features["input_mask"] = create_int_feature(feature.input_mask)
         features["segment_ids"] = create_int_feature(feature.segment_ids)
         features["token_label_ids"] = create_int_feature(feature.token_label_ids)
-        features["predicate_matrix_ids"] = create_int_matrix_feature(feature.predicate_matrix_ids)
-        features["is_real_example"] = create_int_feature([int(feature.is_real_example)])
+        predicate_matrix_indices_flat = np.array(feature.predicate_matrix_ids[0]).reshape([-1])
+        predicate_matrix_values_flat = np.array(feature.predicate_matrix_ids[1]).reshape([-1])
 
-        tf_example = tf.train.Example(features=tf.train.Features(feature=features))
+        features["sparse_predicate_matrix_indices"] = create_int_feature(predicate_matrix_indices_flat)
+        features["sparse_predicate_matrix_values"] = create_float_feature(predicate_matrix_values_flat)
+
+        features["is_real_example"] = create_int_feature([int(feature.is_real_example)])
+        context = tf.train.Features(feature=features)
+        tf_example = tf.train.SequenceExample(context=context)
         writer.write(tf_example.SerializeToString())
     writer.close()
 
 
-def file_based_input_fn_builder(input_file, seq_length, is_training,
+def file_based_input_fn_builder(input_file, seq_length, num_predicate_label, is_training,
                                 drop_remainder):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
@@ -435,14 +452,24 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
         "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
         "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "token_label_ids": tf.FixedLenFeature([seq_length], tf.int64),
-        "predicate_matrix_ids": tf.FixedLenFeature([seq_length * seq_length], tf.int64),
+        "sparse_predicate_matrix_indices": tf.io.FixedLenSequenceFeature([3], tf.int64, allow_missing=True),
+        "sparse_predicate_matrix_values": tf.io.FixedLenSequenceFeature([], tf.float32, allow_missing=True),
         "is_real_example": tf.FixedLenFeature([], tf.int64),
     }
 
-    def _decode_record(record, name_to_features):
+    def _decode_sparse_record(record, name_to_features):
         """Decodes a record to a TensorFlow example."""
         example = tf.parse_single_example(record, name_to_features)
-
+        # Sparse to dense
+        if "predicate_matrix" not in example:
+            indices = example["sparse_predicate_matrix_indices"]
+            values = example["sparse_predicate_matrix_values"]
+            example["predicate_matrix"] = tf.sparse.to_dense(tf.sparse.reorder(
+                tf.SparseTensor(indices=indices, values=values, dense_shape=[seq_length, seq_length, num_predicate_label])),
+                default_value=0.
+            )
+            # Delete things that can't be batched
+            del example["sparse_predicate_matrix_indices"], example["sparse_predicate_matrix_values"]
         # tf.Example only supports tf.int64, but the TPU only supports tf.int32.
         # So cast all int64 to int32.
         for name in list(example.keys()):
@@ -466,10 +493,9 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
 
         d = d.apply(
             tf.contrib.data.map_and_batch(
-                lambda record: _decode_record(record, name_to_features),
+                lambda record: _decode_sparse_record(record, name_to_features),
                 batch_size=batch_size,
                 drop_remainder=drop_remainder))
-
         return d
 
     return input_fn
@@ -482,11 +508,11 @@ def getHeadSelectionScores(encode_input, hidden_size_n1, label_number):
 
     def broadcasting(left, right):
         left = tf.transpose(left, perm=[1, 0, 2])
-        left = tf.expand_dims(left, 3)
+        left = tf.expand_dims(left, 3)  # [L, B, D, 1]
         right = tf.transpose(right, perm=[0, 2, 1])
-        right = tf.expand_dims(right, 0)
+        right = tf.expand_dims(right, 0)  # [1, B, D, L]
         B = left + right
-        B = tf.transpose(B, perm=[1, 0, 3, 2])
+        B = tf.transpose(B, perm=[1, 0, 3, 2])  # [B, L, L, D]
         return B
 
     encode_input_hidden_size = encode_input.shape[-1].value
@@ -505,7 +531,7 @@ def getHeadSelectionScores(encode_input, hidden_size_n1, label_number):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 token_label_ids, predicate_matrix_ids, num_token_labels, num_predicate_labels,
+                 token_label_ids, predicate_matrix, num_token_labels, num_predicate_labels,
                  use_one_hot_embeddings):
     """Creates a classification model."""
     model = modeling.BertModel(
@@ -539,13 +565,11 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         # predicate_head_prediction = tf.argmax(predicate_head_probabilities, axis=3)
         predicate_head_predictions_round = tf.round(predicate_head_probabilities)
         predicate_head_predictions = tf.cast(predicate_head_predictions_round, tf.int32)
-        # shape [batch_size, sequence_length, sequencd_length]
-        predicate_matrix = tf.reshape(predicate_matrix_ids, [-1, bert_sequenc_length, bert_sequenc_length])
-        gold_predicate_matrix_one_hot = tf.one_hot(predicate_matrix, depth=num_predicate_labels, dtype=tf.float32)
-        # shape [batch_size, sequence_length, sequencd_length, predicate_label_numbers]
+        # [batch_size, sequence_length, sequence_length, num_predicate_label]
+        predicate_matrix = tf.reshape(predicate_matrix, [-1, bert_sequenc_length, bert_sequenc_length, num_predicate_labels])
         predicate_sigmoid_cross_entropy_with_logits = tf.nn.sigmoid_cross_entropy_with_logits(
             logits=predicate_score_matrix,
-            labels=gold_predicate_matrix_one_hot)
+            labels=predicate_matrix)
 
         def batch_sequence_matrix_max_sequence_length(batch_sequence_matrix):
             """Get the longest effective length of the input sequence (excluding padding)"""
@@ -608,7 +632,7 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
         input_mask = features["input_mask"]
         segment_ids = features["segment_ids"]
         token_label_ids = features["token_label_ids"]
-        predicate_matrix_ids = features["predicate_matrix_ids"]
+        predicate_matrix = features["predicate_matrix"]
         is_real_example = None
         if "is_real_example" in features:
             is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
@@ -621,7 +645,7 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
          predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
          token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predictions) = create_model(
             bert_config, is_training, input_ids, input_mask, segment_ids,
-            token_label_ids, predicate_matrix_ids, num_token_labels, num_predicate_labels,
+            token_label_ids, predicate_matrix, num_token_labels, num_predicate_labels,
             use_one_hot_embeddings)
 
         tvars = tf.trainable_variables()
@@ -822,6 +846,7 @@ def main(_):
         train_input_fn = file_based_input_fn_builder(
             input_file=train_file,
             seq_length=FLAGS.max_seq_length,
+            num_predicate_label=len(predicate_label_list),
             is_training=True,
             drop_remainder=True)
         estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
@@ -860,6 +885,7 @@ def main(_):
         eval_input_fn = file_based_input_fn_builder(
             input_file=eval_file,
             seq_length=FLAGS.max_seq_length,
+            num_predicate_label=len(predicate_label_list),
             is_training=False,
             drop_remainder=eval_drop_remainder)
 
@@ -898,6 +924,7 @@ def main(_):
         predict_input_fn = file_based_input_fn_builder(
             input_file=predict_file,
             seq_length=FLAGS.max_seq_length,
+            num_predicate_label=len(predicate_label_list),
             is_training=False,
             drop_remainder=predict_drop_remainder)
 
@@ -921,16 +948,16 @@ def main(_):
                             if i >= num_actual_predict_examples:
                                 break
                             token_label_output_line = " ".join(
-                                token_label_id2label[id] for id in token_label_prediction) + "\n"
+                                token_label_id2label[id_] for id_ in token_label_prediction) + "\n"
                             token_label_writer.write(token_label_output_line)
 
                             predicate_head_predictions_flatten = predicate_head_predictions.flatten()
                             predicate_head_predictions_line = " ".join(
-                                predicate_label_id2label[id] for id in predicate_head_predictions_flatten) + "\n"
+                                predicate_label_id2label[id_] for id_ in predicate_head_predictions_flatten) + "\n"
                             predicate_head_predictions_writer.write(predicate_head_predictions_line)
                             #
                             predicate_head_predictions_id_line = " ".join(
-                                str(id) for id in predicate_head_predictions_flatten) + "\n"
+                                str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
                             predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
 
                             # predicate_head_probabilities_flatten = predicate_head_probabilities.flatten()
