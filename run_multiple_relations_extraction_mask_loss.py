@@ -562,6 +562,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         predicate_score_matrix = getHeadSelectionScores(encode_input=sequence_bert_encode_output, hidden_size_n1=100,
                                                         label_number=num_predicate_labels)
         predicate_head_probabilities = tf.nn.sigmoid(predicate_score_matrix)
+
         # predicate_head_prediction = tf.argmax(predicate_head_probabilities, axis=3)
         predicate_head_predictions_round = tf.round(predicate_head_probabilities)
         predicate_head_predictions = tf.cast(predicate_head_predictions_round, tf.int32)
@@ -933,38 +934,35 @@ def main(_):
         predicate_output_predict_file = os.path.join(FLAGS.output_dir, "predicate_head_predictions.txt")
         predicate_output_predict_id_file = os.path.join(FLAGS.output_dir, "predicate_head_predictions_id.txt")
         predicate_head_probabilities_file = os.path.join(FLAGS.output_dir, "predicate_head_probabilities.txt")
-        with open(token_label_output_predict_file, "w", encoding='utf-8') as token_label_writer:
-            with open(predicate_output_predict_file, "w", encoding='utf-8') as predicate_head_predictions_writer:
-                with open(predicate_output_predict_id_file, "w",
-                          encoding='utf-8') as predicate_head_predictions_id_writer:
-                    with open(predicate_head_probabilities_file, "w",
-                              encoding='utf-8') as predicate_head_probabilities_writer:
-                        num_written_lines = 0
-                        tf.logging.info("***** token_label predict and predicate labeling results *****")
-                        for (i, prediction) in enumerate(result):
-                            token_label_prediction = prediction["token_label_predictions"]
-                            predicate_head_predictions = prediction["predicate_head_predictions"]
-                            predicate_head_probabilities = prediction["predicate_head_probabilities"]
-                            if i >= num_actual_predict_examples:
-                                break
-                            token_label_output_line = " ".join(
-                                token_label_id2label[id_] for id_ in token_label_prediction) + "\n"
-                            token_label_writer.write(token_label_output_line)
+        with open(token_label_output_predict_file, "w", encoding='utf-8') as token_label_writer, \
+            open(predicate_output_predict_file, "w", encoding='utf-8') as predicate_head_predictions_writer, \
+            open(predicate_output_predict_id_file, "w", encoding='utf-8') as predicate_head_predictions_id_writer, \
+            open(predicate_head_probabilities_file, "w", encoding='utf-8') as predicate_head_probabilities_writer:
+            num_written_lines = 0
+            tf.logging.info("***** token_label predict and predicate labeling results *****")
+            for (i, prediction) in enumerate(result):
+                token_label_prediction = prediction["token_label_predictions"]
+                predicate_head_predictions = prediction["predicate_head_predictions"]
+                predicate_head_probabilities = prediction["predicate_head_probabilities"]
+                if i >= num_actual_predict_examples:
+                    break
+                token_label_output_line = " ".join(
+                    token_label_id2label[id_] for id_ in token_label_prediction) + "\n"
+                token_label_writer.write(token_label_output_line)
+                predicate_head_predictions_flatten = predicate_head_predictions.flatten()
+                # predicate_head_predictions_line = " ".join(predicate_head_prediction)
+                predicate_head_predictions_line = " ".join("{}->{}:{}".format(loc_i, loc_j, predicate_label_id2label[id_]) for loc_i, loc_j, id_ in np.argwhere(predicate_head_probabilities > 0.5)) + "\n"
+                predicate_head_predictions_writer.write(predicate_head_predictions_line)
+                #
+                predicate_head_predictions_id_line = " ".join(
+                    str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
+                predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
 
-                            predicate_head_predictions_flatten = predicate_head_predictions.flatten()
-                            predicate_head_predictions_line = " ".join(
-                                predicate_label_id2label[id_] for id_ in predicate_head_predictions_flatten) + "\n"
-                            predicate_head_predictions_writer.write(predicate_head_predictions_line)
-                            #
-                            predicate_head_predictions_id_line = " ".join(
-                                str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
-                            predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
+                # predicate_head_probabilities_flatten = predicate_head_probabilities.flatten()
+                # predicate_head_probabilities_line = " ".join(str(prob) for prob in predicate_head_probabilities_flatten) + "\n"
+                # predicate_head_probabilities_writer.write(predicate_head_probabilities_line)
 
-                            # predicate_head_probabilities_flatten = predicate_head_probabilities.flatten()
-                            # predicate_head_probabilities_line = " ".join(str(prob) for prob in predicate_head_probabilities_flatten) + "\n"
-                            # predicate_head_probabilities_writer.write(predicate_head_probabilities_line)
-
-                            num_written_lines += 1
+                num_written_lines += 1
         assert num_written_lines == num_actual_predict_examples
 
 
