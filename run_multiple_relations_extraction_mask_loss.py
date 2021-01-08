@@ -218,9 +218,9 @@ class SKE_2019_Subject_Relation_Object_extraction_Processor(DataProcessor):
             predicate_value_out_list = [eval(seq.replace("\n", '')) for seq in
                                         predicate_value_out_f]
             predicate_location_out_list = [eval(seq.replace("\n", '')) for seq in predicate_location_out_f]
-            examples = list(zip(token_in_list, token_label_out_list, predicate_value_out_list,
-                                predicate_location_out_list))
-            return examples
+        examples = list(zip(token_in_list, token_label_out_list, predicate_value_out_list,
+                            predicate_location_out_list))
+        return examples
 
     def get_train_examples(self, data_dir):
         return self._create_example(self.get_examples(os.path.join(data_dir, "train")), "train")
@@ -276,6 +276,43 @@ class SKE_2019_Subject_Relation_Object_extraction_Processor(DataProcessor):
         return examples
 
 
+class SKE_2019_Subject_Relation_Object_extraction_Processor_V2(SKE_2019_Subject_Relation_Object_extraction_Processor):
+    """Remove so called predicate `N`"""
+
+    def get_predicate_labels(self):
+        return ['丈夫', '上映时间', '专业代码', '主持人', '主演', '主角', '人口数量', '作曲', '作者', '作词', '修业年限', '出品公司', '出版社', '出生地',
+                '出生日期', '创始人', '制片人', '占地面积', '号', '嘉宾', '国籍', '妻子', '字', '官方语言', '导演', '总部地点', '成立日期', '所在城市', '所属专辑',
+                '改编自', '朝代', '歌手', '母亲', '毕业院校', '民族', '气候', '注册资本', '海拔', '父亲', '目', '祖籍', '简称', '编剧', '董事长', '身高',
+                '连载网站', '邮政编码', '面积', '首都']
+
+    def get_examples(self, data_dir):
+        with open(os.path.join(data_dir, "token_in.txt"), "r", encoding='utf-8') as token_in_f,\
+            open(os.path.join(data_dir, "labeling_out.txt"), "r", encoding='utf-8') as labeling_out_f, \
+            open(os.path.join(data_dir, "predicate_value_out.txt"), "r", encoding='utf-8') as predicate_value_out_f,\
+            open(os.path.join(data_dir, "predicate_location_out.txt"), "r", encoding='utf-8') as predicate_location_out_f:
+            token_in_list = [seq.replace("\n", '') for seq in token_in_f]
+            token_label_out_list = [seq.replace("\n", '') for seq in labeling_out_f]
+            predicate_value_out_list = [eval(seq.replace("\n", '')) for seq in
+                                        predicate_value_out_f]
+            predicate_location_out_list = [eval(seq.replace("\n", '')) for seq in predicate_location_out_f]
+        assert len(predicate_value_out_list) == len(predicate_location_out_list)
+        "Remove the `N` predicate in place"
+        predicate_to_keep = set(self.get_predicate_labels())
+        for predicate_values, predicate_locations in zip(predicate_value_out_list, predicate_location_out_list):
+            assert len(predicate_values) == len(predicate_locations)
+            for token_i, (token_i_predicate_values, token_i_predicate_locations) in enumerate(zip(predicate_values, predicate_locations)):
+                assert len(token_i_predicate_values) == len(token_i_predicate_locations)
+                token_i_predicate_values_new, token_i_predicate_locations_new = [], []
+                for kept_predicate_value, kept_predicate_location in filter(lambda pair: pair[0] in predicate_to_keep, zip(token_i_predicate_values, token_i_predicate_locations)):
+                    token_i_predicate_values_new.append(kept_predicate_value)
+                    token_i_predicate_locations_new.append(kept_predicate_location)
+                predicate_values[token_i] = token_i_predicate_values_new
+                predicate_locations[token_i] = token_i_predicate_locations_new
+        examples = list(zip(token_in_list, token_label_out_list, predicate_value_out_list,
+                            predicate_location_out_list))
+        return examples
+
+
 def convert_single_example(ex_index, example, token_label_list, predicate_label_list, max_seq_length,
                            tokenizer, num_predicate_label):
     """Converts a single `InputExample` into a single `InputFeatures`."""
@@ -311,8 +348,8 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
         predicate_value_list = example.predicate_value_list
         predicate_location_list = example.predicate_location_list
     else:
-        predicate_value_list = [["N"] for _ in range(len(token_label))]
-        predicate_location_list = [[i] for i in range(len(token_label))]
+        predicate_value_list = [[] for _ in range(len(token_label))]
+        predicate_location_list = [[] for _ in range(len(token_label))]
 
     predicate_matrix_ids = _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list,
                                                         predicate_location_list, max_seq_length)
@@ -400,7 +437,10 @@ def _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list, pred
                     unique_idx_val_pairs.add(idx_val_pair)
             else:
                 pass
-    indices, values = zip(*idx_val_pairs)
+    if idx_val_pairs:
+        indices, values = zip(*idx_val_pairs)
+    else:
+        indices, values = [], []
     return indices, values
 
 
@@ -748,6 +788,7 @@ def main(_):
 
     processors = {
         "ske_2019": SKE_2019_Subject_Relation_Object_extraction_Processor,
+        "ske_2019_v2": SKE_2019_Subject_Relation_Object_extraction_Processor_V2,
     }
 
     tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
