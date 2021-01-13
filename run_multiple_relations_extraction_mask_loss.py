@@ -515,7 +515,7 @@ def file_based_input_fn_builder(input_file, seq_length, num_predicate_label, is_
         for name in list(example.keys()):
             t = example[name]
             if t.dtype == tf.int64:
-                t = tf.to_int32(t)
+                t = tf.cast(t, tf.int32, "ToInt32")
             example[name] = t
 
         return example
@@ -726,7 +726,8 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
                 scaffold_fn=scaffold_fn)
         elif mode == tf.estimator.ModeKeys.EVAL:
 
-            def metric_fn(predicate_head_select_loss, token_label_per_example_loss, token_label_ids, token_label_logits,
+            def metric_fn(true_predicate_matrix, pred_predicate_matrix,
+                          predicate_head_select_loss, token_label_per_example_loss, token_label_ids, token_label_logits,
                           is_real_example):
                 token_label_predictions = tf.argmax(token_label_logits, axis=-1, output_type=tf.int32)
                 token_label_pos_indices_list = list(range(num_token_labels))[
@@ -750,6 +751,16 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
                                                     average="micro")
                 token_label_loss = tf.metrics.mean(values=token_label_per_example_loss, weights=is_real_example)
                 predicate_head_select_loss = tf.metrics.mean(values=predicate_head_select_loss)
+                multi_head_selection_weight = is_real_example[:, tf.newaxis, tf.newaxis, tf.newaxis]
+
+                precision_multi_head_selection = tf.metrics.precision_at_thresholds(true_predicate_matrix,
+                                                                                    pred_predicate_matrix,
+                                                                                    thresholds=[0.5],
+                                                                                    weights=multi_head_selection_weight)
+                recall_multi_head_selection = tf.metrics.recall_at_thresholds(true_predicate_matrix,
+                                                                              pred_predicate_matrix,
+                                                                              thresholds=[0.5],
+                                                                              weights=multi_head_selection_weight)
                 return {
                     "predicate_head_select_loss": predicate_head_select_loss,
                     "eval_token_label_precision(macro)": token_label_precision_macro,
@@ -759,10 +770,12 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
                     "eval_token_label_recall(micro)": token_label_recall_micro,
                     "eval_token_label_f(micro)": token_label_f_micro,
                     "eval_token_label_loss": token_label_loss,
+                    "eval_multi_head_selection_precision": precision_multi_head_selection,
+                    "eval_multi_head_selection_recall": recall_multi_head_selection
                 }
 
             eval_metrics = (metric_fn,
-                            [predicate_head_select_loss, token_label_per_example_loss,
+                            [predicate_matrix, predicate_head_probabilities, predicate_head_select_loss, token_label_per_example_loss,
                              token_label_ids, token_label_logits, is_real_example])
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -987,12 +1000,36 @@ def main(_):
                 predicate_head_probabilities = prediction["predicate_head_probabilities"]
                 if i >= num_actual_predict_examples:
                     break
-                token_label_output_line = " ".join(
-                    token_label_id2label[id_] for id_ in token_label_prediction) + "\n"
+                token_labels = [token_label_id2label[id_] for id_ in token_label_prediction]
+                token_label_output_line = " ".join(token_labels) + "\n"
                 token_label_writer.write(token_label_output_line)
                 predicate_head_predictions_flatten = predicate_head_predictions.flatten()
                 # predicate_head_predictions_line = " ".join(predicate_head_prediction)
-                predicate_head_predictions_line = " ".join("{}->{}:{}".format(loc_i, loc_j, predicate_label_id2label[id_]) for loc_i, loc_j, id_ in np.argwhere(predicate_head_probabilities > 0.5)) + "\n"
+                positive_triplets = np.argwhere(predicate_head_probabilities > 0.5)
+
+                def get_spans(loc, labels, tokens):
+                    assert len(tokens) == len(labels)
+                    l, r = loc, loc + 1
+                    if labels[l][0] != "B":
+                        return None
+                    type_ = labels[l][0][2:]
+                    while r < len(tokens):
+                        current_token, current_label = tokens[r], labels[r]
+                        if not (current_token[:2] == "##" or ((current_label[0] == "I") and (current_label[2:] == type_))):
+                            break
+                        r += 1
+                    entity_tokens = tokens[l:r]
+                    return {"tokens": entity_tokens, "type": type_}
+
+                human_readable_triplets = []
+                tokens = predict_examples[i].text_token.split(" ")
+                for loc_i, loc_j, id_ in positive_triplets:
+                    subject = get_spans(loc_i, token_labels[1: 1 + len(tokens)], tokens)
+                    object_ = get_spans(loc_j, token_labels[1: 1 + len(tokens)], tokens)
+                    if subject is None or object_ is None:
+                        continue
+                    human_readable_triplets.append((subject, predicate_label_id2label[id_], object_))
+                predicate_head_predictions_line = " ".join("{}-[{}]->{}".format(*spo_triplet) for spo_triplet in human_readable_triplets) + "\n"
                 predicate_head_predictions_writer.write(predicate_head_predictions_line)
                 #
                 predicate_head_predictions_id_line = " ".join(
