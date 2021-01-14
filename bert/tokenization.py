@@ -166,23 +166,14 @@ class FullTokenizer(object):
     self.inv_vocab = {v: k for k, v in self.vocab.items()}
     self.basic_tokenizer = BasicTokenizer(do_lower_case=do_lower_case)
     self.wordpiece_tokenizer = WordpieceTokenizer(vocab=self.vocab)
-    self.wordpiece_tokenizer_not_UNK = WordpieceTokenizer_not_UNK(vocab=self.vocab)
 
-  def tokenize(self, text):
+  def tokenize(self, text, convert_oov=True):
     split_tokens = []
     for token in self.basic_tokenizer.tokenize(text):
-      for sub_token in self.wordpiece_tokenizer.tokenize(token):
+      for sub_token in self.wordpiece_tokenizer.tokenize(token, convert_oov=convert_oov):
         split_tokens.append(sub_token)
 
     return split_tokens
-
-  def tokenize_not_UNK(self, text):
-      split_tokens = []
-      for token in self.basic_tokenizer.tokenize(text):
-          for sub_token in self.wordpiece_tokenizer_not_UNK.tokenize(token):
-              split_tokens.append(sub_token)
-
-      return split_tokens
 
   def convert_tokens_to_ids(self, tokens):
     return convert_by_vocab(self.vocab, tokens)
@@ -306,68 +297,6 @@ class BasicTokenizer(object):
     return "".join(output)
 
 
-class WordpieceTokenizer_not_UNK(object):
-  """Runs WordPiece tokenziation."""
-  def __init__(self, vocab, unk_token="[UNK]", max_input_chars_per_word=200):
-    self.vocab = vocab
-    self.unk_token = unk_token
-    self.max_input_chars_per_word = max_input_chars_per_word
-
-  def tokenize(self, text):
-    """Tokenizes a piece of text into its word pieces.
-
-    This uses a greedy longest-match-first algorithm to perform tokenization
-    using the given vocabulary.
-
-    For example:
-      input = "unaffable"
-      output = ["un", "##aff", "##able"]
-
-    Args:
-      text: A single token or whitespace separated tokens. This should have
-        already been passed through `BasicTokenizer.
-
-    Returns:
-      A list of wordpiece tokens.
-    """
-
-    text = convert_to_unicode(text)
-
-    output_tokens = []
-    for token in whitespace_tokenize(text):
-      chars = list(token)
-      if len(chars) > self.max_input_chars_per_word:
-        output_tokens.append(self.unk_token)
-        continue
-
-      is_bad = False
-      start = 0
-      sub_tokens = []
-      while start < len(chars):
-        end = len(chars)
-        cur_substr = None
-        while start < end:
-          substr = "".join(chars[start:end])
-          if start > 0:
-            substr = "##" + substr
-          if substr in self.vocab:
-            cur_substr = substr
-            break
-          end -= 1
-        if cur_substr is None:
-          is_bad = True
-          break
-        sub_tokens.append(cur_substr)
-        start = end
-
-      if is_bad:
-        #output_tokens.append(self.unk_token)
-        output_tokens.append(token)
-      else:
-        output_tokens.extend(sub_tokens)
-    return output_tokens
-
-
 class WordpieceTokenizer(object):
   """Runs WordPiece tokenziation."""
 
@@ -376,7 +305,7 @@ class WordpieceTokenizer(object):
     self.unk_token = unk_token
     self.max_input_chars_per_word = max_input_chars_per_word
 
-  def tokenize(self, text):
+  def tokenize(self, text, convert_oov=True):
     """Tokenizes a piece of text into its word pieces.
 
     This uses a greedy longest-match-first algorithm to perform tokenization
@@ -389,7 +318,7 @@ class WordpieceTokenizer(object):
     Args:
       text: A single token or whitespace separated tokens. This should have
         already been passed through `BasicTokenizer.
-
+      convert_oov: bool, to convert out of vocabulary tokens to self.unk_token or not.
     Returns:
       A list of wordpiece tokens.
     """
@@ -424,7 +353,10 @@ class WordpieceTokenizer(object):
         start = end
 
       if is_bad:
-        output_tokens.append(self.unk_token)
+        if convert_oov:
+          output_tokens.append(self.unk_token)
+        else:
+          output_tokens.append(token)
       else:
         output_tokens.extend(sub_tokens)
     return output_tokens
@@ -449,7 +381,7 @@ def _is_control(char):
   if char == "\t" or char == "\n" or char == "\r":
     return False
   cat = unicodedata.category(char)
-  if cat.startswith("C"):
+  if cat in ("Cc", "Cf"):
     return True
   return False
 
