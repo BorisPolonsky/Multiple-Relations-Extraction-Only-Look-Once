@@ -77,6 +77,10 @@ flags.DEFINE_bool(
     "do_predict", False,
     "Whether to run the model in inference mode on the test set.")
 
+flags.DEFINE_bool(
+    "do_interactive_predict", False,
+    "Whether to run the model in inference mode on user input.")
+
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
@@ -347,12 +351,24 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
     if example.predicate_value_list is not None:
         predicate_value_list = example.predicate_value_list
         predicate_location_list = example.predicate_location_list
+        assert len(predicate_value_list) == len(predicate_location_list)
     else:
         predicate_value_list = [[] for _ in range(len(token_label))]
         predicate_location_list = [[] for _ in range(len(token_label))]
 
-    predicate_matrix_ids = _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list,
-                                                        predicate_location_list, max_seq_length)
+    predicate_idx_value_pairs = _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list,
+                                                             predicate_location_list, max_seq_length)
+    # Get sparse representation of target predicate selection matrix
+    indices, values = [], []
+    for (loc_i, loc_j, label_id), val in predicate_idx_value_pairs:
+        # Shift loc by one given the leading `[CLS]` token
+        loc_i, loc_j = loc_i + 1, loc_j + 1
+        # Position `0` for `[CLS]`, Position `max_seq_length - 1` for `[SEP]`
+        if (0 < loc_i < max_seq_length - 1) and (0 < loc_j < max_seq_length - 1):
+            indices.append((loc_i, loc_j, label_id))
+            values.append(val)
+    assert len(indices) == len(values)
+    predicate_matrix_ids = indices, values
     tokens = []
     token_label_ids = []
     segment_ids = []
@@ -437,11 +453,7 @@ def _get_sparse_predicate_matrix(predicate_label_map, predicate_value_list, pred
                     unique_idx_val_pairs.add(idx_val_pair)
             else:
                 pass
-    if idx_val_pairs:
-        indices, values = zip(*idx_val_pairs)
-    else:
-        indices, values = [], []
-    return indices, values
+    return idx_val_pairs
 
 
 def file_based_convert_examples_to_features(
@@ -541,6 +553,77 @@ def file_based_input_fn_builder(input_file, seq_length, num_predicate_label, is_
     return input_fn
 
 
+def interactive_input_fn_builder(input_stream, seq_length, num_predicate_label):
+    """Creates an `input_fn` closure to be passed to TPUEstimator."""
+
+    def _decode_sparse_record(example):
+        """Decodes a record to a TensorFlow example."""
+        # Sparse to dense
+        if "predicate_matrix" not in example:
+            indices = example["sparse_predicate_matrix_indices"]
+            values = example["sparse_predicate_matrix_values"]
+            example["predicate_matrix"] = tf.sparse.to_dense(tf.sparse.reorder(
+                tf.SparseTensor(indices=indices, values=values, dense_shape=[seq_length, seq_length, num_predicate_label])),
+                default_value=0.
+            )
+            # Delete things that can't be batched
+            del example["sparse_predicate_matrix_indices"], example["sparse_predicate_matrix_values"]
+        # tf.Example only supports tf.int64, but the TPU only supports tf.int32.
+        # So cast all int64 to int32.
+        for name in list(example.keys()):
+            t = example[name]
+            if t.dtype == tf.int64:
+                t = tf.cast(t, tf.int32, "ToInt32")
+            example[name] = t
+
+        return example
+
+    def input_fn(params):
+        """The actual input function."""
+        # Dataset.from_generator() uses tf.py_func, which is not TPU compatible.
+        d = tf.data.Dataset.from_generator(input_stream,
+                                           {
+                                               "input_ids": tf.int64,
+                                               "input_mask": tf.int64,
+                                               "segment_ids": tf.int64,
+                                               "token_label_ids": tf.int64,
+                                               "sparse_predicate_matrix_indices": tf.int64,
+                                               "sparse_predicate_matrix_values": tf.float32,
+                                               "is_real_example": tf.int64
+
+                                           },
+                                           output_shapes={
+                                               "input_ids": tf.TensorShape([seq_length]),
+                                               "input_mask": tf.TensorShape([seq_length]),
+                                               "segment_ids": tf.TensorShape([seq_length]),
+                                               "token_label_ids": tf.TensorShape([seq_length]),
+                                               "sparse_predicate_matrix_indices": tf.TensorShape([None, 3]),
+                                               "sparse_predicate_matrix_values": tf.TensorShape([None]),
+                                               "is_real_example": tf.TensorShape([])
+                                           },
+                                           args=None)
+        d = d.map(_decode_sparse_record)
+        d = d.batch(batch_size=1, drop_remainder=False)
+        return d
+
+    return input_fn
+
+
+def get_spans(loc, labels, tokens):
+    assert len(tokens) == len(labels)
+    l, r = loc, loc + 1
+    if labels[l][0] != "B":
+        return None
+    type_ = labels[l][2:]
+    while r < len(tokens):
+        current_token, current_label = tokens[r], labels[r]
+        if not (current_token[:2] == "##" or ((current_label[0] == "I") and (current_label[2:] == type_))):
+            break
+        r += 1
+    entity_tokens = tokens[l:r]
+    return {"tokens": entity_tokens, "type": type_}
+
+
 def getHeadSelectionScores(encode_input, hidden_size_n1, label_number):
     """
     Check out this paper https://arxiv.org/abs/1804.07847
@@ -597,8 +680,8 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         sequence_bert_encode_output = tf.nn.dropout(sequence_bert_encode_output, keep_prob=0.9)
 
     with tf.variable_scope("predicate_head_select_loss"):
-        bert_sequenc_length = sequence_bert_encode_output.shape[-2].value
-        # shape [batch_size, sequence_length, sequencd_length, predicate_label_numbers]
+        bert_sequence_length = sequence_bert_encode_output.shape[-2]
+        # shape [batch_size, sequence_length, sequence_length, predicate_label_numbers]
         predicate_score_matrix = getHeadSelectionScores(encode_input=sequence_bert_encode_output, hidden_size_n1=100,
                                                         label_number=num_predicate_labels)
         predicate_head_probabilities = tf.nn.sigmoid(predicate_score_matrix)
@@ -607,7 +690,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         predicate_head_predictions_round = tf.round(predicate_head_probabilities)
         predicate_head_predictions = tf.cast(predicate_head_predictions_round, tf.int32)
         # [batch_size, sequence_length, sequence_length, num_predicate_label]
-        predicate_matrix = tf.reshape(predicate_matrix, [-1, bert_sequenc_length, bert_sequenc_length, num_predicate_labels])
+        predicate_matrix = tf.reshape(predicate_matrix, [-1, bert_sequence_length, bert_sequence_length, num_predicate_labels])
         predicate_sigmoid_cross_entropy_with_logits = tf.nn.sigmoid_cross_entropy_with_logits(
             logits=predicate_score_matrix,
             labels=predicate_matrix)
@@ -807,9 +890,9 @@ def main(_):
     tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                   FLAGS.init_checkpoint)
 
-    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.do_interactive_predict:
         raise ValueError(
-            "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
+            "At least one of `do_train`, `do_eval` or `do_predict' `do_interactive_predict' must be True.")
 
     bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
@@ -1007,31 +1090,29 @@ def main(_):
                 # predicate_head_predictions_line = " ".join(predicate_head_prediction)
                 positive_triplets = np.argwhere(predicate_head_probabilities > 0.5)
 
-                def get_spans(loc, labels, tokens):
-                    assert len(tokens) == len(labels)
-                    l, r = loc, loc + 1
-                    if labels[l][0] != "B":
-                        return None
-                    type_ = labels[l][0][2:]
-                    while r < len(tokens):
-                        current_token, current_label = tokens[r], labels[r]
-                        if not (current_token[:2] == "##" or ((current_label[0] == "I") and (current_label[2:] == type_))):
-                            break
-                        r += 1
-                    entity_tokens = tokens[l:r]
-                    return {"tokens": entity_tokens, "type": type_}
-
+                # Re-do input feature conversion to restore model input
+                current_input_feature = convert_single_example(i, predict_examples[i], token_label_list, predicate_label_list,
+                                                               FLAGS.max_seq_length, tokenizer, len(predicate_label_list))
+                tokens = tokenizer.convert_ids_to_tokens(current_input_feature.input_ids)
+                l, r = 1, len(tokens)
+                for idx, token in enumerate(tokens):
+                    if token == "[SEP]":
+                        r = idx
+                        break
                 human_readable_triplets = []
-                tokens = predict_examples[i].text_token.split(" ")
                 for loc_i, loc_j, id_ in positive_triplets:
-                    subject = get_spans(loc_i, token_labels[1: 1 + len(tokens)], tokens)
-                    object_ = get_spans(loc_j, token_labels[1: 1 + len(tokens)], tokens)
-                    if subject is None or object_ is None:
+                    subject = get_spans(loc_i, token_labels, tokens)
+                    object_ = get_spans(loc_j, token_labels, tokens)
+                    is_valid_triplet = subject is not None and \
+                                       object_ is not None and \
+                                       (l <= loc_i < r) and \
+                                       (l <= loc_j < r)
+                    if not is_valid_triplet:
                         continue
                     human_readable_triplets.append((subject, predicate_label_id2label[id_], object_))
                 predicate_head_predictions_line = " ".join("{}-[{}]->{}".format(*spo_triplet) for spo_triplet in human_readable_triplets) + "\n"
                 predicate_head_predictions_writer.write(predicate_head_predictions_line)
-                #
+
                 predicate_head_predictions_id_line = " ".join(
                     str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
                 predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
@@ -1042,6 +1123,69 @@ def main(_):
 
                 num_written_lines += 1
         assert num_written_lines == num_actual_predict_examples
+
+    if FLAGS.do_interactive_predict:
+        current_input_feature: InputFeatures = None
+
+        def input_stream():
+            nonlocal current_input_feature
+            idx = 0
+            while True:
+                print("Input sentence:")
+                line = sys.stdin.readline().rstrip()
+                if not line:
+                    print("Empty input")
+                    continue
+                tokens_with_oov = tokenizer.tokenize(line, convert_oov=True)
+                example = InputExample("example-{}".format(idx), " ".join(tokens_with_oov))
+                feature = convert_single_example(idx, example, token_label_list, predicate_label_list,
+                                                 FLAGS.max_seq_length, tokenizer, len(predicate_label_list))
+                current_input_feature = feature
+                predicate_matrix_indices = np.array(feature.predicate_matrix_ids[0]).reshape([-1, 3])
+                predicate_matrix_values = np.array(feature.predicate_matrix_ids[1]).reshape([-1])
+
+                data = {
+                    "input_ids": feature.input_ids,
+                    "input_mask": feature.input_mask,
+                    "segment_ids": feature.segment_ids,
+                    "token_label_ids": feature.token_label_ids,
+                    "sparse_predicate_matrix_indices": predicate_matrix_indices,
+                    "sparse_predicate_matrix_values": predicate_matrix_values,
+                    "is_real_example": 1.
+                }
+                yield data
+                idx += 1
+
+        result = estimator.predict(input_fn=
+                                   interactive_input_fn_builder(input_stream,
+                                                                seq_length=FLAGS.max_seq_length,
+                                                                num_predicate_label=len(predicate_label_list),))
+
+        tf.logging.info("***** token_label predict and predicate labeling results *****")
+        for (i, prediction) in enumerate(result):
+            tokens = tokenizer.convert_ids_to_tokens(current_input_feature.input_ids)
+            l, r = 1, len(tokens)
+            for idx, token in enumerate(tokens):
+                if token == "[SEP]":
+                    r = idx
+                    break
+            token_label_prediction = prediction["token_label_predictions"]
+            predicate_head_predictions = prediction["predicate_head_predictions"]
+            predicate_head_probabilities = prediction["predicate_head_probabilities"]
+            token_labels = [token_label_id2label[id_] for id_ in token_label_prediction]
+            assert len(tokens) == len(token_labels)
+            token_label_output_line = " ".join(token_labels) + "\n"
+            positive_triplets = np.argwhere(predicate_head_probabilities > 0.5)
+            for loc_i, loc_j, id_ in positive_triplets:
+                subject = get_spans(loc_i, tokens, token_labels)
+                object_ = get_spans(loc_j, tokens, token_labels)
+                is_valid_triplet = subject is not None and \
+                                   object_ is not None and\
+                                   (l <= loc_i < r) and \
+                                   (l <= loc_j < r)
+                if not is_valid_triplet:
+                    print("Invalid triplet:")
+                print("{}-[{}]->{}".format(subject, predicate_label_id2label[id_], object_))
 
 
 if __name__ == "__main__":
