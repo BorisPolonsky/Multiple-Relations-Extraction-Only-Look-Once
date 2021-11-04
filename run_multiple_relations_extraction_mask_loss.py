@@ -1177,8 +1177,8 @@ def main(_):
             token_label_output_line = " ".join(token_labels) + "\n"
             positive_triplets = np.argwhere(predicate_head_probabilities > 0.5)
             for loc_i, loc_j, id_ in positive_triplets:
-                subject = get_spans(loc_i, tokens, token_labels)
-                object_ = get_spans(loc_j, tokens, token_labels)
+                subject = get_spans(loc_i, token_labels, tokens)
+                object_ = get_spans(loc_j, token_labels, tokens)
                 is_valid_triplet = subject is not None and \
                                    object_ is not None and\
                                    (l <= loc_i < r) and \
