@@ -176,8 +176,8 @@ class Model_data_preparation(object):
                         else:
                             spo_list = []
                         text = a_row_raw_data["text"]
-                        text_tokened = self.bert_tokenizer.tokenize(text)
-                        text_tokened_not_UNK = self.bert_tokenizer.tokenize(self, text, convert_oov=False)
+                        text_tokened = self.bert_tokenizer.tokenize(text, convert_oov=True)
+                        text_tokened_not_UNK = self.bert_tokenizer.tokenize(text, convert_oov=False)
                         if file_set_type in ["train", "valid"] or (not self.Competition_Mode):
                             labeling_list, predicate_value_list, predicate_location_list, tokener_error_flag = \
                                 self.subject_object_labeling(spo_list=spo_list, text_tokened=text_tokened,
