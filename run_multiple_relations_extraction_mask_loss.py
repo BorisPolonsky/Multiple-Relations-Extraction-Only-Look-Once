@@ -81,6 +81,10 @@ flags.DEFINE_bool(
     "do_interactive_predict", False,
     "Whether to run the model in inference mode on user input.")
 
+flags.DEFINE_bool(
+    "do_export", False,
+    "Whether to export the model in as SavedModel.")
+
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
@@ -757,7 +761,6 @@ def model_fn_builder(bert_config, num_token_labels, num_predicate_labels, init_c
         segment_ids = features["segment_ids"]
         token_label_ids = features["token_label_ids"]
         predicate_matrix = features["predicate_matrix"]
-        is_real_example = None
         if "is_real_example" in features:
             is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
         else:
@@ -890,9 +893,9 @@ def main(_):
     tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
                                                   FLAGS.init_checkpoint)
 
-    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.do_interactive_predict:
+    if not any([FLAGS.do_train, FLAGS.do_eval, FLAGS.do_predict, FLAGS.do_interactive_predict, FLAGS.do_export]):
         raise ValueError(
-            "At least one of `do_train`, `do_eval` or `do_predict' `do_interactive_predict' must be True.")
+            "At least one of `do_train`, `do_eval`, `do_predict`, `do_interactive_predict' or `do_export` must be True.")
 
     bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
@@ -1186,6 +1189,87 @@ def main(_):
                 if not is_valid_triplet:
                     print("Invalid triplet:")
                 print("{}-[{}]->{}".format(subject, predicate_label_id2label[id_], object_))
+
+    if FLAGS.do_export:
+        builder = tf.saved_model.builder.SavedModelBuilder(os.path.join(FLAGS.output_dir, "export"))
+        with tf.Graph().as_default():
+            serialized_tf_examples = tf.placeholder(tf.string, name="tf_example")
+            seq_length = FLAGS.max_seq_length
+            name_to_features = {
+                "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
+                "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
+                "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
+                "token_label_ids": tf.FixedLenFeature([seq_length], tf.int64),
+                "predicate_matrix": tf.io.FixedLenFeature([seq_length, seq_length, num_predicate_labels], tf.float32),
+                "is_real_example": tf.FixedLenFeature([], tf.int64),
+            }
+            # deserialize
+            tf_examples = tf.parse_example(serialized_tf_examples, name_to_features)
+            # rename tensors through tf.identity
+            input_ids = tf.identity(tf_examples["input_ids"], name="input_ids")
+            input_mask = tf.identity(tf_examples["input_mask"], name="input_mask")
+            segment_ids = tf.identity(tf_examples["segment_ids"], name="segment_ids")
+            token_label_ids = tf.identity(tf_examples["token_label_ids"], name="token_label_ids")
+            predicate_matrix = tf.identity(tf_examples["predicate_matrix"], name="predicate_matrix")
+
+            for name in sorted(tf_examples.keys()):
+                tf.logging.info("  name = %s, shape = %s" % (name, tf_examples[name].shape))
+            use_one_hot_embeddings = FLAGS.use_tpu
+            is_training = False
+            (total_loss,
+             predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
+             token_label_loss, token_label_per_example_loss, token_label_logits,
+             token_label_predictions) = create_model(
+                bert_config, is_training, input_ids, input_mask, segment_ids,
+                token_label_ids, predicate_matrix, num_token_labels, num_predicate_labels,
+                use_one_hot_embeddings)
+
+            tvars = tf.trainable_variables()
+            tf.logging.info("***** Loading Model to be Exported *****")
+            if tf.train.latest_checkpoint(FLAGS.output_dir):
+                init_checkpoint = FLAGS.output_dir
+            else:
+                tf.logging.info("Could not find checkpoint specified in `output_dir`, "
+                                "loading model from `init_checkpoint`.")
+                init_checkpoint = FLAGS.init_checkpoint
+            (assignment_map, initialized_variable_names
+             ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
+            if FLAGS.use_tpu:
+                raise NotImplemented("Exporting model for TPU is not implemented/tested yet.")
+            else:
+                tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+
+            tf.logging.info("**** Trainable Variables ****")
+            for var in tvars:
+                init_string = ""
+                if var.name in initialized_variable_names:
+                    init_string = ", *INIT_FROM_CKPT*"
+                tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+                                init_string)
+
+            prediction_signature = (
+                tf.saved_model.signature_def_utils.build_signature_def(
+                    inputs={
+                        "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
+                        "input_mask": tf.saved_model.utils.build_tensor_info(input_mask),
+                        "segment_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
+                    },
+
+                    outputs={
+                        "token_label_predictions": tf.saved_model.utils.build_tensor_info(token_label_predictions),
+                        "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
+                    },
+                    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
+
+            with tf.Session() as sess:
+                sess.run(tf.global_variables_initializer())  # To be removed
+                builder.add_meta_graph_and_variables(sess, [tf.saved_model.tag_constants.SERVING],
+                                                     signature_def_map={
+                                                         tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY: prediction_signature,
+                                                     },
+                                                     main_op=tf.tables_initializer(),
+                                                     strip_default_attrs=True)
+                builder.save()
 
 
 if __name__ == "__main__":
