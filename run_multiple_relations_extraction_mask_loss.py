@@ -1205,12 +1205,19 @@ def main(_):
             }
             # deserialize
             tf_examples = tf.parse_example(serialized_tf_examples, name_to_features)
-            # rename tensors through tf.identity
-            input_ids = tf.identity(tf_examples["input_ids"], name="input_ids")
-            input_mask = tf.identity(tf_examples["input_mask"], name="input_mask")
-            segment_ids = tf.identity(tf_examples["segment_ids"], name="segment_ids")
-            token_label_ids = tf.identity(tf_examples["token_label_ids"], name="token_label_ids")
+            # Rename and optionally cast `dtype` of tensors
+            use_int32 = True
             predicate_matrix = tf.identity(tf_examples["predicate_matrix"], name="predicate_matrix")
+            if use_int32:
+                input_ids = tf.cast(tf_examples["input_ids"], tf.int32, name="input_ids")
+                input_mask = tf.cast(tf_examples["input_mask"], tf.int32, name="input_mask")
+                segment_ids = tf.cast(tf_examples["segment_ids"], tf.int32, name="segment_ids")
+                token_label_ids = tf.cast(tf_examples["token_label_ids"], tf.int32, name="token_label_ids")
+            else:
+                input_ids = tf.identity(tf_examples["input_ids"], name="input_ids")
+                input_mask = tf.identity(tf_examples["input_mask"], name="input_mask")
+                segment_ids = tf.identity(tf_examples["segment_ids"], name="segment_ids")
+                token_label_ids = tf.identity(tf_examples["token_label_ids"], name="token_label_ids")
 
             for name in sorted(tf_examples.keys()):
                 tf.logging.info("  name = %s, shape = %s" % (name, tf_examples[name].shape))
@@ -1246,7 +1253,18 @@ def main(_):
                     init_string = ", *INIT_FROM_CKPT*"
                 tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                                 init_string)
-
+            default_signature = (
+                tf.saved_model.signature_def_utils.build_signature_def(
+                    inputs={
+                        "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
+                        "input_mask": tf.saved_model.utils.build_tensor_info(input_mask),
+                        "segment_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
+                    },
+                    outputs={
+                        "token_label_logits": tf.saved_model.utils.build_tensor_info(token_label_logits),
+                        "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
+                    },
+                    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
             prediction_signature = (
                 tf.saved_model.signature_def_utils.build_signature_def(
                     inputs={
@@ -1254,7 +1272,6 @@ def main(_):
                         "input_mask": tf.saved_model.utils.build_tensor_info(input_mask),
                         "segment_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
                     },
-
                     outputs={
                         "token_label_predictions": tf.saved_model.utils.build_tensor_info(token_label_predictions),
                         "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
@@ -1262,10 +1279,11 @@ def main(_):
                     method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
 
             with tf.Session() as sess:
-                sess.run(tf.global_variables_initializer())  # To be removed
+                sess.run(tf.global_variables_initializer())
                 builder.add_meta_graph_and_variables(sess, [tf.saved_model.tag_constants.SERVING],
                                                      signature_def_map={
-                                                         tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY: prediction_signature,
+                                                         tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: default_signature,
+                                                         "predict": prediction_signature
                                                      },
                                                      main_op=tf.tables_initializer(),
                                                      strip_default_attrs=True)
