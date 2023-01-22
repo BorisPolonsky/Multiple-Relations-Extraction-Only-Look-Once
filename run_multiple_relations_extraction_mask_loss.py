@@ -71,7 +71,7 @@ argparser.add_argument("--eval-batch-size", default=8, type=int, help="Total bat
 argparser.add_argument("--predict-batch-size", default=8, type=int, help="Total batch size for predict.")
 argparser.add_argument("--learning-rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
 
-argparser.add_argument("--num-train-epochs", default=3.0, type=float, help="Total number of training epochs to perform.")
+argparser.add_argument("--num-train-epochs", default=3, type=int, help="Total number of training epochs to perform.")
 
 argparser.add_argument("--warmup_proportion", default=0.1, help=
     "Proportion of training to perform linear learning rate warmup for. "
@@ -368,7 +368,6 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
     token_label_ids.append(token_label_map["[SEP]"])
 
     input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
     # The mask has 1 for real tokens and 0 for padding tokens. Only real
     # tokens are attended to.
     input_mask = [1] * len(input_ids)
@@ -380,6 +379,17 @@ def convert_single_example(ex_index, example, token_label_list, predicate_label_
         segment_ids.append(0)
         token_label_ids.append(0)
         tokens.append("[Padding]")
+    """
+    transformers.BertTokenizerFast
+    encoded_input = tokenizer.encode_plus("".join(tokens), max_length=max_seq_length, padding="max_length")
+    input_ids = encoded_input.input_ids
+    input_mask = encoded_input.input_attention_mask
+    segment_ids = encoded_input.token_type_ids
+    # The mask has 1 for real tokens and 0 for padding tokens. Only real
+    # tokens are attended to.
+    input_mask = [1] * len(input_ids)
+    """
+
 
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
@@ -657,132 +667,168 @@ def get_spans(loc, labels, tokens):
     return {"tokens": entity_tokens, "type": type_}
 
 
-def getHeadSelectionScores(encode_input, hidden_size_n1, label_number):
-    """
-    Check out this paper https://arxiv.org/abs/1804.07847
-    """
 
-    def broadcasting(left, right):
+
+
+class MultiHeadSelection(tf.keras.layers.Layer):
+    def __init__(self, hidden_size, output_size, name=None):
+        super().__init__(name=name)
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+
+        self.is_built = False
+
+    def __call__(self, inputs):
+        # Create variables on first call.
+        if not self.is_built:
+            self.v = self.add_weight("v", shape=[self.hidden_size, self.output_size], initializer="glorot_uniform", dtype=self.dtype, trainable=True)
+            self.b_s = self.add_weight("b_s", shape=[self.hidden_size], initializer="zero", dtype=self.dtype, trainable=True)
+            self.bert_sequence_length = inputs.shape[-2]
+            encode_input_hidden_size = inputs.shape[-1]
+            self.u_a = self.add_weight("u_a",
+             shape=[encode_input_hidden_size, self.hidden_size],
+            #initializer=self.kernel_initializer,
+            #regularizer=self.kernel_regularizer,
+            #constraint=self.kernel_constraint,
+            # dtype=self.dtype,
+            dtype=self.dtype,
+            trainable=True)
+            self.w_a = self.add_weight("w_a",
+             shape=[encode_input_hidden_size, self.hidden_size],
+            #initializer=self.kernel_initializer,
+            #regularizer=self.kernel_regularizer,
+            #constraint=self.kernel_constraint,
+            # dtype=self.dtype,
+            dtype=self.dtype,
+            trainable=True)
+            #self.u_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
+            #self.w_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
+            self.is_built = True
+        # shape [batch_size, sequence_length, sequence_length, output_size]
+        predicate_score_matrix = self.get_head_selection_scores(inputs)
+        return predicate_score_matrix
+        predicate_head_probabilities = tf.nn.sigmoid(predicate_score_matrix)
+
+        # predicate_head_prediction = tf.argmax(predicate_head_probabilities, axis=3)
+        predicate_head_predictions_round = tf.round(predicate_head_probabilities)
+        predicate_head_predictions = tf.cast(predicate_head_predictions_round, tf.int32)
+        # [batch_size, sequence_length, sequence_length, num_predicate_label]
+        predicate_matrix = tf.reshape(predicate_matrix, [-1, self.bert_sequence_length, self.bert_sequence_length, self.output_size])
+        predicate_sigmoid_cross_entropy_with_logits = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=predicate_score_matrix,
+            labels=predicate_matrix)
+
+        def batch_sequence_matrix_max_sequence_length(batch_sequence_matrix):
+            """Get the longest effective length of the input sequence (excluding padding)"""
+            mask = tf.math.logical_not(tf.math.equal(batch_sequence_matrix, 0))
+            mask = tf.cast(mask, tf.float32)
+            mask_length = tf.reduce_sum(mask, axis=1)
+            mask_length = tf.cast(mask_length, tf.int32)
+            mask_max_length = tf.reduce_max(mask_length)
+            return mask_max_length
+
+        mask_max_length = batch_sequence_matrix_max_sequence_length(token_label_ids)
+
+        predicate_sigmoid_cross_entropy_with_logits = predicate_sigmoid_cross_entropy_with_logits[
+                                                    :, :mask_max_length, :mask_max_length, :]
+        # shape []
+        predicate_head_select_loss = tf.reduce_sum(predicate_sigmoid_cross_entropy_with_logits)
+
+    def get_head_selection_scores(self, encode_input):
+        """
+        Check out this paper https://arxiv.org/abs/1804.07847
+        """
+        #with tf.device("cpu"): # A temporary workaround
+        left = tf.einsum('aij,jk->aik', encode_input, self.u_a)
+        right = tf.einsum('aij,jk->aik', encode_input, self.w_a)
+
+        # Broadcasting
         left = tf.transpose(left, perm=[1, 0, 2])
         left = tf.expand_dims(left, 3)  # [L, B, D, 1]
         right = tf.transpose(right, perm=[0, 2, 1])
         right = tf.expand_dims(right, 0)  # [1, B, D, L]
         B = left + right
         B = tf.transpose(B, perm=[1, 0, 3, 2])  # [B, L, L, D]
-        return B
+        outer_sum = B
 
-    encode_input_hidden_size = encode_input.shape[-1].value
-    u_a = tf.get_variable("u_a", [encode_input_hidden_size, hidden_size_n1])
-    w_a = tf.get_variable("w_a", [encode_input_hidden_size, hidden_size_n1])
-    v = tf.get_variable("v", [hidden_size_n1, label_number])
-    b_s = tf.get_variable("b_s", [hidden_size_n1])
+        outer_sum_bias = outer_sum + self.b_s
+        output = tf.tanh(outer_sum_bias)
+        g = tf.einsum('aijk,kp->aijp', output, self.v)
+        return g
 
-    left = tf.einsum('aij,jk->aik', encode_input, u_a)
-    right = tf.einsum('aij,jk->aik', encode_input, w_a)
-    outer_sum = broadcasting(left, right)
-    outer_sum_bias = outer_sum + b_s
-    output = tf.tanh(outer_sum_bias)
-    g = tf.einsum('aijk,kp->aijp', output, v)
-    return g
+    def build(self, input_shape):
+        dtype = tf.as_dtype(self.dtype or backend.floatx())
+        if not (dtype.is_floating or dtype.is_complex):
+            raise TypeError(
+                "A Dense layer can only be built with a floating-point "
+                f"dtype. Received: dtype={dtype}"
+            )
 
-
-class PredicateHead(tf.Module):
-    pass
-
-class TransformerMultiHeadSelectionModel(tf.Module):
-    def __init__(self, transformer_model) -> None:
+        input_shape = tf.TensorShape(input_shape)
+        last_dim = tf.compat.dimension_value(input_shape[-1])
+        if last_dim is None:
+            raise ValueError(
+                "The last dimension of the inputs to a Dense layer "
+                "should be defined. Found None. "
+                f"Full input shape received: {input_shape}"
+            )
+        self.input_spec = InputSpec(min_ndim=2, axes={-1: last_dim})
+        self.kernel = self.add_weight(
+            "kernel",
+            shape=[last_dim, self.units],
+            initializer=self.kernel_initializer,
+            regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint,
+            dtype=self.dtype,
+            trainable=True,
+        )
+        if self.use_bias:
+            self.bias = self.add_weight(
+                "bias",
+                shape=[
+                    self.units,
+                ],
+                initializer=self.bias_initializer,
+                regularizer=self.bias_regularizer,
+                constraint=self.bias_constraint,
+                dtype=self.dtype,
+                trainable=True,
+            )
+        else:
+            self.bias = None
+        self.built = True
+class TransformerMultiRelationExtrationModel(tf.keras.Model):
+    def __init__(self, transformer_model, num_relation, num_label) -> None:
         super().__init__()
         self.transformer_model = transformer_model
+        self.sequence_clf = tf.keras.layers.Dense(num_label,
+        activation=None,
+        use_bias=True,
+        kernel_initializer='glorot_uniform',
+        bias_initializer='zeros')
+        self.multi_head_section = MultiHeadSelection(hidden_size=100, output_size=num_relation)
+        self.is_built = False
 
     #@tf.function(input_signature=[tf.TensorSpec(shape=[], dtype=tf.string)])
     #def serve(self, input_ids, input_mask, segment_ids)
 
-    def __call__(self, input_ids, input_mask, segment_ids, training=False):
+    def __call__(self, input_ids, attention_mask, token_type_ids, training=False):
         # Create variables on first call.
         if not self.is_built:
             seq_len = input_ids.shape[1]
-            """
-            self.w = tf.Variable(
-            tf.random.normal([x.shape[-1], self.out_features]), name='w')
-            self.b = tf.Variable(tf.zeros([self.out_features]), name='b')
+            self.seq_len = tf.constant(seq_len)
+            #self.sequence_clf.build()
             self.is_built = True
-            """
-
-        model = self.transformer_model
-
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token. float Tensor of shape [batch_size, hidden_size]
-        # model_pooled_output = model.get_pooled_output()
-
-        #     """Gets final hidden layer of encoder.
-        #
-        #     Returns:
-        #       float Tensor of shape [batch_size, seq_length, hidden_size] corresponding
-        #       to the final hidden of the transformer encoder.
-        #     """
-        sequence_bert_encode_output = model.get_sequence_output()
+        transformer_output = self.transformer_model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        # [batch_size, sequence_length, transformer_embedding_dim]
+        sequence_encode_output = transformer_output.last_hidden_state
         if training:
-            sequence_bert_encode_output = tf.nn.dropout(sequence_bert_encode_output, rate=0.1)
+            sequence_encode_output = tf.nn.dropout(sequence_encode_output, rate=0.1)
+        predicate_matrix_score = self.multi_head_section(sequence_encode_output)
+        sequence_clf_logits = self.sequence_clf(sequence_encode_output)
+        return sequence_clf_logits, predicate_matrix_score
 
-        with tf.variable_scope("predicate_head_select_loss"):
-            bert_sequence_length = sequence_bert_encode_output.shape[-2]
-            # shape [batch_size, sequence_length, sequence_length, predicate_label_numbers]
-            predicate_score_matrix = getHeadSelectionScores(encode_input=sequence_bert_encode_output, hidden_size_n1=100,
-                                                            label_number=num_predicate_labels)
-            predicate_head_probabilities = tf.nn.sigmoid(predicate_score_matrix)
 
-            # predicate_head_prediction = tf.argmax(predicate_head_probabilities, axis=3)
-            predicate_head_predictions_round = tf.round(predicate_head_probabilities)
-            predicate_head_predictions = tf.cast(predicate_head_predictions_round, tf.int32)
-            # [batch_size, sequence_length, sequence_length, num_predicate_label]
-            predicate_matrix = tf.reshape(predicate_matrix, [-1, bert_sequence_length, bert_sequence_length, num_predicate_labels])
-            predicate_sigmoid_cross_entropy_with_logits = tf.nn.sigmoid_cross_entropy_with_logits(
-                logits=predicate_score_matrix,
-                labels=predicate_matrix)
-
-            def batch_sequence_matrix_max_sequence_length(batch_sequence_matrix):
-                """Get the longest effective length of the input sequence (excluding padding)"""
-                mask = tf.math.logical_not(tf.math.equal(batch_sequence_matrix, 0))
-                mask = tf.cast(mask, tf.float32)
-                mask_length = tf.reduce_sum(mask, axis=1)
-                mask_length = tf.cast(mask_length, tf.int32)
-                mask_max_length = tf.reduce_max(mask_length)
-                return mask_max_length
-
-            mask_max_length = batch_sequence_matrix_max_sequence_length(token_label_ids)
-
-            predicate_sigmoid_cross_entropy_with_logits = predicate_sigmoid_cross_entropy_with_logits[
-                                                        :, :mask_max_length, :mask_max_length, :]
-            # shape []
-            predicate_head_select_loss = tf.reduce_sum(predicate_sigmoid_cross_entropy_with_logits)
-
-        with tf.variable_scope("token_label_loss"):
-            bert_encode_hidden_size = sequence_bert_encode_output.shape[-1].value
-            token_label_output_weight = tf.get_variable(
-                "token_label_output_weights", [num_token_labels, bert_encode_hidden_size],
-                initializer=tf.truncated_normal_initializer(stddev=0.02)
-            )
-            token_label_output_bias = tf.get_variable(
-                "token_label_output_bias", [num_token_labels], initializer=tf.zeros_initializer()
-            )
-            sequence_bert_encode_output = tf.reshape(sequence_bert_encode_output, [-1, bert_encode_hidden_size])
-            token_label_logits = tf.matmul(sequence_bert_encode_output, token_label_output_weight, transpose_b=True)
-            token_label_logits = tf.nn.bias_add(token_label_logits, token_label_output_bias)
-
-            token_label_logits = tf.reshape(token_label_logits, [-1, args.max_seq_length, num_token_labels])
-            token_label_log_probs = tf.nn.log_softmax(token_label_logits, axis=-1)
-
-            token_label_one_hot_labels = tf.one_hot(token_label_ids, depth=num_token_labels, dtype=tf.float32)
-            token_label_per_example_loss = -tf.reduce_sum(token_label_one_hot_labels * token_label_log_probs, axis=-1)
-            token_label_loss = tf.reduce_sum(token_label_per_example_loss)
-            token_label_probabilities = tf.nn.softmax(token_label_logits, axis=-1)
-            token_label_predictions = tf.argmax(token_label_probabilities, axis=-1)
-            # return (token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predict)
-
-        loss = predicate_head_select_loss + token_label_loss
-        return (loss,
-                predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
-                token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predictions)
 
     @classmethod
     def model_builder(cls, bert_config, num_token_labels, num_predicate_labels, init_checkpoint, learning_rate,
@@ -794,8 +840,15 @@ class TransformerMultiHeadSelectionModel(tf.Module):
         #model = transformers.TFAutoModelForSequenceClassification.from_pretrained('bert-base-chinese', resume_download=True)
         # model = transformers.TFBertModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
         model = transformers.TFAutoModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
-        output = model(input_ids=tf.constant([[0] * 512]))
+
+        # model = transformers.TFAutoModelForSequenceClassification.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
+        tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
+        model = TransformerMultiRelationExtrationModel(transformer_model=model, num_relation=num_predicate_labels, num_label=num_token_labels)
+        inputs = {'input_ids': tf.constant([[101, 3844, 6407, 3844, 6407, 102]]), 'token_type_ids': tf.constant([[0, 0, 0, 0, 0, 0]]), 'attention_mask': tf.constant([[1, 1, 1, 1, 1, 1]])}
+        # inputs = {'input_ids': [101, 3844, 6407, 3844, 6407, 102], 'token_type_ids': [0, 0, 0, 0, 0, 0], 'attention_mask': [1, 1, 1, 1, 1, 1]}
+        output = model(**inputs)
         print(model)
+        return model
         def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
 
 
@@ -930,10 +983,52 @@ class TransformerMultiHeadSelectionModel(tf.Module):
             is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
         else:
             is_real_example = tf.ones(tf.shape(token_label_ids), dtype=tf.float32)  # TO DO
-
+        # https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit?hl=en
         x, y = data
         # WIP
         with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)  # Forward pass
+            # Compute our own loss
+
+            bert_encode_hidden_size = sequence_encode_output.shape[-1].value
+            token_label_output_weight = tf.get_variable(
+                "token_label_output_weights", [num_token_labels, bert_encode_hidden_size],
+                initializer=tf.truncated_normal_initializer(stddev=0.02)
+            )
+            token_label_output_bias = tf.get_variable(
+                "token_label_output_bias", [num_token_labels], initializer=tf.zeros_initializer()
+            )
+            sequence_encode_output = tf.reshape(sequence_encode_output, [-1, bert_encode_hidden_size])
+            token_label_logits = tf.matmul(sequence_encode_output, token_label_output_weight, transpose_b=True)
+            token_label_logits = tf.nn.bias_add(token_label_logits, token_label_output_bias)
+
+            token_label_logits = tf.reshape(token_label_logits, [-1, args.max_seq_length, num_token_labels])
+            token_label_log_probs = tf.nn.log_softmax(token_label_logits, axis=-1)
+
+            token_label_one_hot_labels = tf.one_hot(token_label_ids, depth=num_token_labels, dtype=tf.float32)
+            token_label_per_example_loss = -tf.reduce_sum(token_label_one_hot_labels * token_label_log_probs, axis=-1)
+            token_label_loss = tf.reduce_sum(token_label_per_example_loss)
+            token_label_probabilities = tf.nn.softmax(token_label_logits, axis=-1)
+            token_label_predictions = tf.argmax(token_label_probabilities, axis=-1)
+            loss = predicate_head_select_loss + token_label_loss
+            # return (token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predict)
+        return (loss,
+                predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
+                token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predictions)
+            
+
+        # Compute gradients
+        trainable_vars = self.trainable_variables
+        gradients = tape.gradient(loss, trainable_vars)
+
+        # Update weights
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
+        # Compute our own metrics
+        loss_tracker.update_state(loss)
+        mae_metric.update_state(y, y_pred)
+        return {"loss": loss_tracker.result(), "mae": mae_metric.result()}
+
             y_pred = self(x, training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
@@ -949,6 +1044,9 @@ class TransformerMultiHeadSelectionModel(tf.Module):
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
 
+
+
+           
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
                  token_label_ids, predicate_matrix, num_token_labels, num_predicate_labels,
                  use_one_hot_embeddings):
@@ -971,14 +1069,14 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
     #       float Tensor of shape [batch_size, seq_length, hidden_size] corresponding
     #       to the final hidden of the transformer encoder.
     #     """
-    sequence_bert_encode_output = model.get_sequence_output()
+    sequence_encode_output = model.get_sequence_output()
     if is_training:
-        sequence_bert_encode_output = tf.nn.dropout(sequence_bert_encode_output, keep_prob=0.9)
+        sequence_encode_output = tf.nn.dropout(sequence_encode_output, keep_prob=0.9)
 
     with tf.variable_scope("predicate_head_select_loss"):
-        bert_sequence_length = sequence_bert_encode_output.shape[-2]
+        bert_sequence_length = sequence_encode_output.shape[-2]
         # shape [batch_size, sequence_length, sequence_length, predicate_label_numbers]
-        predicate_score_matrix = getHeadSelectionScores(encode_input=sequence_bert_encode_output, hidden_size_n1=100,
+        predicate_score_matrix = getHeadSelectionScores(encode_input=sequence_encode_output, hidden_size_n1=100,
                                                         label_number=num_predicate_labels)
         predicate_head_probabilities = tf.nn.sigmoid(predicate_score_matrix)
 
@@ -1008,7 +1106,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         predicate_head_select_loss = tf.reduce_sum(predicate_sigmoid_cross_entropy_with_logits)
 
     with tf.variable_scope("token_label_loss"):
-        bert_encode_hidden_size = sequence_bert_encode_output.shape[-1].value
+        bert_encode_hidden_size = sequence_encode_output.shape[-1].value
         token_label_output_weight = tf.get_variable(
             "token_label_output_weights", [num_token_labels, bert_encode_hidden_size],
             initializer=tf.truncated_normal_initializer(stddev=0.02)
@@ -1016,8 +1114,8 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         token_label_output_bias = tf.get_variable(
             "token_label_output_bias", [num_token_labels], initializer=tf.zeros_initializer()
         )
-        sequence_bert_encode_output = tf.reshape(sequence_bert_encode_output, [-1, bert_encode_hidden_size])
-        token_label_logits = tf.matmul(sequence_bert_encode_output, token_label_output_weight, transpose_b=True)
+        sequence_encode_output = tf.reshape(sequence_encode_output, [-1, bert_encode_hidden_size])
+        token_label_logits = tf.matmul(sequence_encode_output, token_label_output_weight, transpose_b=True)
         token_label_logits = tf.nn.bias_add(token_label_logits, token_label_output_bias)
 
         token_label_logits = tf.reshape(token_label_logits, [-1, args.max_seq_length, num_token_labels])
@@ -1193,7 +1291,7 @@ def main(args):
             "At least one of `do-train`, `do-eval`, `do-predict`, `do-interactive-predict' or `do-export` must be True.")
     
     tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
-    tokenized = tokenizer.batch_decode(["Anything here"])
+
     #tokenizer = tokenization.FullTokenizer(
     #    vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
 
@@ -1255,7 +1353,7 @@ def main(args):
             len(train_examples) / args.train_batch_size * args.num_train_epochs)
         num_warmup_steps = int(num_train_steps * args.warmup_proportion)
     
-    model = TransformerMultiHeadSelectionModel.model_builder(
+    model = TransformerMultiRelationExtrationModel.model_builder(
         bert_config=bert_config,
         num_token_labels=num_token_labels,
         num_predicate_labels=num_predicate_labels,
@@ -1282,8 +1380,8 @@ def main(args):
 
     if args.do_train:
         train_file = os.path.join(args.output_dir, "train.tf_record")
-        file_based_convert_examples_to_features(
-            train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
+        #file_based_convert_examples_to_features(
+        #    train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
         logger.info("***** Running training *****")
         train_dataset = read_serialized_dataset(
             input_file=train_file,
@@ -1294,10 +1392,13 @@ def main(args):
             drop_remainder=True)
         logger.info(f"  Num examples = {train_dataset.cardinality().numpy()}")
         logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info(f"  Num steps = {num_train_steps}", )
-
+        logger.info(f"  Num steps = {num_train_steps}")
+        model.train_step(train_dataset.take(5, name=None))
+        # model.transformer_model.train_step(train_dataset.take(5, name=None))
         #stimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
-        model.compile(optimizer=optimizer, loss=model.compute_loss) # can also use any keras loss fn
+        optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
+        model.compile(optimizer=optimizer) # can also use any keras loss fn
+        #model.compile(optimizer=optimizer, loss=model.compute_loss) # can also use any keras loss fn
         model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size), epochs=args.num_train_epochs, batch_size=args.train_batch_size)
     if args.do_eval:
         eval_examples = processor.get_dev_examples(args.data_dir)
