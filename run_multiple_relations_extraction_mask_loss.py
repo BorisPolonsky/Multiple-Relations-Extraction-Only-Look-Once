@@ -1103,16 +1103,21 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         # TODO: Mask Loss
         sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
         loss = self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
-        return {"loss": loss}
+
         # self.compiled_metrics.update_state(y, y_pred, sample_weight)
         # Collect metrics to return
         return_metrics = {}
+        # TODO: do it in compiled_loss
+        return_metrics["loss"] = loss
+        return_metrics["predicate_head_select_loss"] = self.loss["multi_head_selection"](y_true=predicate_matrix, y_pred=out["multi_head_selection"])
+        return_metrics["eval_token_label_loss"] = self.loss["sequence_clf"](y_true=token_label_ids, y_pred=out["sequence_clf"])
+        return return_metrics
         for metric in self.metrics:
             result = metric.result()
-        if isinstance(result, dict):
-            return_metrics.update(result)
-        else:
-            return_metrics[metric.name] = result
+            if isinstance(result, dict):
+                return_metrics.update(result)
+            else:
+                return_metrics[metric.name] = result
         return return_metrics
 
            
