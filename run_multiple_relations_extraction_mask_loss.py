@@ -1017,7 +1017,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
             multi_head_selection_loss = tf.reduce_sum(multi_head_selection_loss_per_interact)
             loss = multi_head_selection_loss + seq_clf_loss
             """
-            
+
 
         # Compute gradients
         trainable_vars = self.trainable_variables
@@ -1025,9 +1025,21 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
 
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
         return {"loss": loss}
         #return {"loss": loss, "multi_head_selection_loss": multi_head_selection_loss, "seq_clf_loss": seq_clf_loss}
         # Compute our own metrics
+        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        # Collect metrics to return
+        return_metrics = {}
+        for metric in self.metrics:
+            result = metric.result()
+        if isinstance(result, dict):
+            return_metrics.update(result)
+        else:
+            return_metrics[metric.name] = result
+        return return_metrics
+
         loss_tracker.update_state(loss)
         mae_metric.update_state(y, y_pred)
         return {"loss": loss_tracker.result(), "mae": mae_metric.result()}
@@ -1045,6 +1057,63 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
 
+    def test_step(self, data):
+        """The logic for one evaluation step.
+
+        This method can be overridden to support custom evaluation logic.
+        This method is called by `Model.make_test_function`.
+
+        This function should contain the mathematical logic for one step of
+        evaluation.
+        This typically includes the forward pass, loss calculation, and metrics
+        updates.
+
+        Configuration details for *how* this logic is run (e.g. `tf.function` and
+        `tf.distribute.Strategy` settings), should be left to
+        `Model.make_test_function`, which can also be overridden.
+
+        Args:
+        data: A nested structure of `Tensor`s.
+
+        Returns:
+        A `dict` containing values that will be passed to
+        `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
+        values of the `Model`'s metrics are returned.
+        """
+        x, y, is_real_example = data
+
+
+        token_label_ids = y["token_label_ids"]
+        predicate_matrix = y["predicate_matrix"]
+        """
+        # Auxiliary Tensor
+        if "is_real_example" in features:
+            is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
+        else:
+            is_real_example = tf.ones(tf.shape(token_label_ids), dtype=tf.float32)  # TO DO
+        """
+        # https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit?hl=en
+        # Compute our own loss
+        # y_pred = self(x, training=True)  # Forward pass
+        # Compute the loss value
+        # (the loss function is configured in `compile()`)
+        # loss = self.compiled_loss(y, y_pred, regularization_losses=self.losses)
+        # sequence_clf_logits, predicate_matrix_score = self(x, training=True)
+        out = self(x, training=True)
+        # TODO: Mask Loss
+        sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
+        loss = self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
+        return {"loss": loss}
+        # self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        # Collect metrics to return
+        return_metrics = {}
+        for metric in self.metrics:
+            result = metric.result()
+        if isinstance(result, dict):
+            return_metrics.update(result)
+        else:
+            return_metrics[metric.name] = result
+        return return_metrics
 
            
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
