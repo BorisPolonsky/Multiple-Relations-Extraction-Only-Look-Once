@@ -993,22 +993,18 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
             # (the loss function is configured in `compile()`)
             # loss = self.compiled_loss(y, y_pred, regularization_losses=self.losses)
             sequence_clf_logits, predicate_matrix_score = self(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids, training=True)
-            # loss = tf.keras.metrics.binary_focal_crossentropy(y_true, y_pred, apply_class_balancing=False, alpha=0.25, gamma=2.0, from_logits=True, label_smoothing=0.0, axis=-1)
             seq_clf_target = tf.one_hot(token_label_ids, depth=self.seq_clf_output_size, axis=-1)
-            seq_clf_loss = tf.keras.metrics.categorical_crossentropy(seq_clf_target, sequence_clf_logits, from_logits=True, label_smoothing=0.0, axis=-1)
-            token_label_logits_flat = tf.reshape(sequence_clf_logits, [-1, self.max_seq_len, num_token_labels])
-            token_label_log_probs = tf.nn.log_softmax(token_label_logits_flat, axis=-1)
+            # [batch_size, seq_len]
+            seq_clf_loss_per_tag = tf.keras.metrics.categorical_crossentropy(y_true=seq_clf_target, y_pred=sequence_clf_logits, from_logits=True, label_smoothing=0.0, axis=-1)
+            # TODO: mask loss
+            # [batch_size]
+            seq_clf_loss_per_example = tf.math.reduce_sum(seq_clf_loss_per_tag, axis=-1)
+            seq_clf_loss = tf.reduce_mean(seq_clf_loss_per_example)
+            # multi_head_selection_loss_per_interact = tf.keras.metrics.binary_focal_crossentropy(y_true=predicate_matrix, y_pred=predicate_matrix_score, apply_class_balancing=False, alpha=0.25, gamma=2.0, from_logits=True, label_smoothing=0.0, axis=-1)
+            multi_head_selection_loss_per_interact = tf.keras.metrics.binary_crossentropy(y_true=predicate_matrix, y_pred=predicate_matrix_score, from_logits=True, label_smoothing=0.0, axis=-1)
+            multi_head_selection_loss = tf.reduce_sum(multi_head_selection_loss_per_interact)
+            loss = multi_head_selection_loss + seq_clf_loss
 
-            token_label_one_hot_labels = tf.one_hot(token_label_ids, depth=num_token_labels, dtype=tf.float32)
-            token_label_per_example_loss = -tf.reduce_sum(token_label_one_hot_labels * token_label_log_probs, axis=-1)
-            token_label_loss = tf.reduce_sum(token_label_per_example_loss)
-            token_label_probabilities = tf.nn.softmax(token_label_logits, axis=-1)
-            token_label_predictions = tf.argmax(token_label_probabilities, axis=-1)
-            loss = predicate_head_select_loss + token_label_loss
-            # return (token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predict)
-        return (loss,
-                predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
-                token_label_loss, token_label_per_example_loss, token_label_logits, token_label_predictions)
             
 
         # Compute gradients
@@ -1017,7 +1013,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
 
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
+        return {"loss": loss, "multi_head_selection_loss": multi_head_selection_loss, "seq_clf_loss": seq_clf_loss}
         # Compute our own metrics
         loss_tracker.update_state(loss)
         mae_metric.update_state(y, y_pred)
