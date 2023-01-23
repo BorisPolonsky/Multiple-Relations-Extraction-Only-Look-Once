@@ -543,8 +543,7 @@ def file_based_input_fn_builder(input_file, seq_length, num_predicate_label, is_
 
 
 
-def read_serialized_dataset(input_file, seq_length, num_predicate_label, is_training, batch_size,
-                                drop_remainder):
+def read_serialized_dataset(input_file, seq_length, num_predicate_label, shuffle_buffer_size=None):
     """Parse serialized dataset"""
     name_to_features = {
         "input_ids": tf.io.FixedLenFeature([seq_length], tf.int64),
@@ -589,10 +588,9 @@ def read_serialized_dataset(input_file, seq_length, num_predicate_label, is_trai
         num_parallel_reads=None,
         name=None
     )
-    if is_training:
-        d = d.shuffle(buffer_size=100)
+    if shuffle_buffer_size:
+        d = d.shuffle(buffer_size=shuffle_buffer_size)
     d = d.map(lambda record: _decode_sparse_record(record, name_to_features))
-    d = d.batch(batch_size, drop_remainder=drop_remainder)
     return d
 
 
@@ -797,16 +795,15 @@ class MultiHeadSelection(tf.keras.layers.Layer):
         else:
             self.bias = None
         self.built = True
+
 class TransformerMultiRelationExtrationModel(tf.keras.Model):
-    def __init__(self, transformer_model, num_relation, num_label) -> None:
+    def __init__(self, transformer_model, multi_head_selection_output_size, seq_clf_output_size) -> None:
         super().__init__()
         self.transformer_model = transformer_model
-        self.sequence_clf = tf.keras.layers.Dense(num_label,
-        activation=None,
-        use_bias=True,
-        kernel_initializer='glorot_uniform',
-        bias_initializer='zeros')
-        self.multi_head_section = MultiHeadSelection(hidden_size=100, output_size=num_relation)
+        self.sequence_clf = tf.keras.layers.Dense(seq_clf_output_size, activation=None, use_bias=True)
+        self.multi_head_section = MultiHeadSelection(hidden_size=100, output_size=multi_head_selection_output_size)
+        self.multi_head_selection_output_size = multi_head_selection_output_size
+        self.seq_clf_output_size = seq_clf_output_size
         self.is_built = False
 
     #@tf.function(input_signature=[tf.TensorSpec(shape=[], dtype=tf.string)])
@@ -815,15 +812,17 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
     def __call__(self, input_ids, attention_mask, token_type_ids, training=False):
         # Create variables on first call.
         if not self.is_built:
-            seq_len = input_ids.shape[1]
-            self.seq_len = tf.constant(seq_len)
-            #self.sequence_clf.build()
+            max_seq_len = input_ids.shape[1]
+            self.max_seq_len = tf.constant(max_seq_len)
+            # self.transformer_model.build()
+            # self.sequence_clf.build()
             self.is_built = True
         transformer_output = self.transformer_model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
         # [batch_size, sequence_length, transformer_embedding_dim]
         sequence_encode_output = transformer_output.last_hidden_state
         if training:
             sequence_encode_output = tf.nn.dropout(sequence_encode_output, rate=0.1)
+        # [batch_size, sequence_length, num_relation]
         predicate_matrix_score = self.multi_head_section(sequence_encode_output)
         sequence_clf_logits = self.sequence_clf(sequence_encode_output)
         return sequence_clf_logits, predicate_matrix_score
@@ -843,11 +842,11 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
 
         # model = transformers.TFAutoModelForSequenceClassification.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
         tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
-        model = TransformerMultiRelationExtrationModel(transformer_model=model, num_relation=num_predicate_labels, num_label=num_token_labels)
-        inputs = {'input_ids': tf.constant([[101, 3844, 6407, 3844, 6407, 102]]), 'token_type_ids': tf.constant([[0, 0, 0, 0, 0, 0]]), 'attention_mask': tf.constant([[1, 1, 1, 1, 1, 1]])}
+        model = TransformerMultiRelationExtrationModel(transformer_model=model, multi_head_selection_output_size=num_predicate_labels, seq_clf_output_size=num_token_labels)
+        # inputs = {'input_ids': tf.constant([[101, 3844, 6407, 3844, 6407, 102]]), 'token_type_ids': tf.constant([[0, 0, 0, 0, 0, 0]]), 'attention_mask': tf.constant([[1, 1, 1, 1, 1, 1]])}
         # inputs = {'input_ids': [101, 3844, 6407, 3844, 6407, 102], 'token_type_ids': [0, 0, 0, 0, 0, 0], 'attention_mask': [1, 1, 1, 1, 1, 1]}
-        output = model(**inputs)
-        print(model)
+        # output = model(**inputs)
+        # print(model)
         return model
         def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
 
@@ -968,42 +967,37 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
-        """The `model_fn` for TPUEstimator."""
         features = data
-        logger.info("*** Features ***")
-        for name in sorted(features.keys()):
-            logger.info("  name = %s, shape = %s" % (name, features[name].shape))
+        # logger.info("*** Features ***")
+        # for name in sorted(features.keys()):
+        #    logger.info("  name = %s, shape = %s" % (name, features[name].shape))
 
+        # Input Tensor
         input_ids = features["input_ids"]
-        input_mask = features["input_mask"]
-        segment_ids = features["segment_ids"]
+        attention_mask = features["input_mask"]
+        token_type_ids = features["segment_ids"]
+        # Target Output
         token_label_ids = features["token_label_ids"]
         predicate_matrix = features["predicate_matrix"]
+        # Auxiliary Tensor
         if "is_real_example" in features:
             is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
         else:
             is_real_example = tf.ones(tf.shape(token_label_ids), dtype=tf.float32)  # TO DO
         # https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit?hl=en
-        x, y = data
         # WIP
         with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)  # Forward pass
             # Compute our own loss
-
-            bert_encode_hidden_size = sequence_encode_output.shape[-1].value
-            token_label_output_weight = tf.get_variable(
-                "token_label_output_weights", [num_token_labels, bert_encode_hidden_size],
-                initializer=tf.truncated_normal_initializer(stddev=0.02)
-            )
-            token_label_output_bias = tf.get_variable(
-                "token_label_output_bias", [num_token_labels], initializer=tf.zeros_initializer()
-            )
-            sequence_encode_output = tf.reshape(sequence_encode_output, [-1, bert_encode_hidden_size])
-            token_label_logits = tf.matmul(sequence_encode_output, token_label_output_weight, transpose_b=True)
-            token_label_logits = tf.nn.bias_add(token_label_logits, token_label_output_bias)
-
-            token_label_logits = tf.reshape(token_label_logits, [-1, args.max_seq_length, num_token_labels])
-            token_label_log_probs = tf.nn.log_softmax(token_label_logits, axis=-1)
+            # y_pred = self(x, training=True)  # Forward pass
+            # Compute the loss value
+            # (the loss function is configured in `compile()`)
+            # loss = self.compiled_loss(y, y_pred, regularization_losses=self.losses)
+            sequence_clf_logits, predicate_matrix_score = self(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids, training=True)
+            # loss = tf.keras.metrics.binary_focal_crossentropy(y_true, y_pred, apply_class_balancing=False, alpha=0.25, gamma=2.0, from_logits=True, label_smoothing=0.0, axis=-1)
+            seq_clf_target = tf.one_hot(token_label_ids, depth=self.seq_clf_output_size, axis=-1)
+            seq_clf_loss = tf.keras.metrics.categorical_crossentropy(seq_clf_target, sequence_clf_logits, from_logits=True, label_smoothing=0.0, axis=-1)
+            token_label_logits_flat = tf.reshape(sequence_clf_logits, [-1, self.max_seq_len, num_token_labels])
+            token_label_log_probs = tf.nn.log_softmax(token_label_logits_flat, axis=-1)
 
             token_label_one_hot_labels = tf.one_hot(token_label_ids, depth=num_token_labels, dtype=tf.float32)
             token_label_per_example_loss = -tf.reduce_sum(token_label_one_hot_labels * token_label_log_probs, axis=-1)
@@ -1029,10 +1023,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         mae_metric.update_state(y, y_pred)
         return {"loss": loss_tracker.result(), "mae": mae_metric.result()}
 
-            y_pred = self(x, training=True)  # Forward pass
-            # Compute the loss value
-            # (the loss function is configured in `compile()`)
-            loss = self.compiled_loss(y, y_pred, regularization_losses=self.losses)
+
 
         # Compute gradients
         trainable_vars = self.trainable_variables
@@ -1387,22 +1378,20 @@ def main(args):
             input_file=train_file,
             seq_length=args.max_seq_length,
             num_predicate_label=len(predicate_label_list),
-            is_training=True,
-            batch_size=args.train_batch_size,
-            drop_remainder=True)
+            shuffle_buffer_size=100)
         logger.info(f"  Num examples = {train_dataset.cardinality().numpy()}")
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info(f"  Num steps = {num_train_steps}")
-        model.train_step(train_dataset.take(5, name=None))
-        # model.transformer_model.train_step(train_dataset.take(5, name=None))
+        # model.train_step(train_dataset.shuffle(1000).batch(args.train_batch_size).take(1))
         #stimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
         optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
         model.compile(optimizer=optimizer) # can also use any keras loss fn
         #model.compile(optimizer=optimizer, loss=model.compute_loss) # can also use any keras loss fn
-        model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size), epochs=args.num_train_epochs, batch_size=args.train_batch_size)
+        model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size, drop_remainder=True), epochs=args.num_train_epochs, batch_size=args.train_batch_size)
     if args.do_eval:
         eval_examples = processor.get_dev_examples(args.data_dir)
         num_actual_eval_examples = len(eval_examples)
+        """
         if args.use_tpu:
             # TPU requires a fixed batch size for all batches, therefore the number
             # of examples must be a multiple of the batch size, or else examples
@@ -1411,7 +1400,7 @@ def main(args):
             # support a per-instance weight, and these get a weight of 0.0).
             while len(eval_examples) % args.eval_batch_size != 0:
                 eval_examples.append(PaddingInputExample())
-
+        """
         eval_file = os.path.join(args.output_dir, "eval.tf_record")
         file_based_convert_examples_to_features(
             eval_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, eval_file)
@@ -1421,7 +1410,7 @@ def main(args):
                         len(eval_examples), num_actual_eval_examples,
                         len(eval_examples) - num_actual_eval_examples)
         logger.info("  Batch size = %d", args.eval_batch_size)
-
+        """
         # This tells the estimator to run through the entire set.
         eval_steps = None
         # However, if running eval on the TPU, you will need to specify the
@@ -1437,7 +1426,7 @@ def main(args):
             num_predicate_label=len(predicate_label_list),
             is_training=False,
             drop_remainder=eval_drop_remainder)
-
+        """
         result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
