@@ -28,13 +28,6 @@ args.DEFINE_string(
     "The config json file corresponding to the pre-trained BERT model. "
     "This specifies the model architecture.")
 
-args.DEFINE_string(
-    "bert_config_file", None,
-    "The config json file corresponding to the pre-trained BERT model. "
-    "This specifies the model architecture.")
-
-
-
 args.DEFINE_string("vocab_file", None,
                     "The vocabulary file that the BERT model was trained on.")
 """
@@ -56,7 +49,7 @@ args.DEFINE_bool(
 """
 
 argparser.add_argument(
-    "--max_seq_length", default=128, type=int,
+    "--max-seq-length", default=128, type=int,
     help="The maximum total input sequence length after WordPiece tokenization. "
     "Sequences longer than this will be truncated, and sequences shorter "
     "than this will be padded.")
@@ -73,7 +66,7 @@ argparser.add_argument("--learning-rate", default=5e-5, type=float, help="The in
 
 argparser.add_argument("--num-train-epochs", default=3, type=int, help="Total number of training epochs to perform.")
 
-argparser.add_argument("--warmup_proportion", default=0.1, help=
+argparser.add_argument("--warmup-proportion", default=0.1, help=
     "Proportion of training to perform linear learning rate warmup for. "
     "E.g., 0.1 = 10% of training.")
 
@@ -806,7 +799,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         self.multi_head_section = MultiHeadSelection(hidden_size=100, output_size=multi_head_selection_output_size, name="multi_head_selection1")
         self.multi_head_selection_output_size = multi_head_selection_output_size
         self.seq_clf_output_size = seq_clf_output_size
-        self.is_built = False
+        self.built = False
 
     #@tf.function(input_signature=[tf.TensorSpec(shape=[], dtype=tf.string)])
     #def serve(self, input_ids, input_mask, segment_ids)
@@ -817,12 +810,12 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         attention_mask = inputs["attention_mask"]
         token_type_ids = inputs["token_type_ids"]
         # Create variables on first call.
-        if not self.is_built:
+        if not self.built:
             max_seq_len = input_ids.shape[1]
             self.max_seq_len = tf.constant(max_seq_len)
             # self.transformer_model.build()
             # self.sequence_clf.build()
-            self.is_built = True
+            self.built = True
         transformer_output = self.transformer_model(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
         # [batch_size, sequence_length, transformer_embedding_dim]
         sequence_encode_output = transformer_output.last_hidden_state
@@ -841,19 +834,9 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
                         num_train_steps, num_warmup_steps, use_tpu,
                         use_one_hot_embeddings):
         """Returns `model_fn` closure for TPUEstimator."""
-
-
-        #model = transformers.TFAutoModelForSequenceClassification.from_pretrained('bert-base-chinese', resume_download=True)
-        # model = transformers.TFBertModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
         model = transformers.TFAutoModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
-
-        # model = transformers.TFAutoModelForSequenceClassification.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
         tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
         model = TransformerMultiRelationExtrationModel(transformer_model=model, multi_head_selection_output_size=num_predicate_labels, seq_clf_output_size=num_token_labels)
-        # inputs = {'input_ids': tf.constant([[101, 3844, 6407, 3844, 6407, 102]]), 'token_type_ids': tf.constant([[0, 0, 0, 0, 0, 0]]), 'attention_mask': tf.constant([[1, 1, 1, 1, 1, 1]])}
-        # inputs = {'input_ids': [101, 3844, 6407, 3844, 6407, 102], 'token_type_ids': [0, 0, 0, 0, 0, 0], 'attention_mask': [1, 1, 1, 1, 1, 1]}
-        # output = model(**inputs)
-        # print(model)
         return model
         def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
 
@@ -970,7 +953,6 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
             return output_spec
 
         return model_fn
-
 
     def train_step(self, data):
         # super().train_step(data)
@@ -1103,16 +1085,12 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         out = self(x, training=True)
         # TODO: Mask Loss
         sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
-        loss = self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
-
+        # Updates stateful loss metrics.
+        # self.compiled_loss(y, y_pred, sample_weight, regularization_losses=self.losses)
+        self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
         self.compiled_metrics.update_state(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
         # Collect metrics to return
         return_metrics = {}
-        # TODO: do it in compiled_loss
-        # return_metrics["loss"] = loss
-        # return_metrics["predicate_head_select_loss"] = self.loss["multi_head_selection"](y_true=predicate_matrix, y_pred=out["multi_head_selection"])
-        # return_metrics["eval_token_label_loss"] = self.loss["sequence_clf"](y_true=token_label_ids, y_pred=out["sequence_clf"])
-        # return return_metrics
         for metric in self.metrics:
             result = metric.result()
             if isinstance(result, dict):
@@ -1485,11 +1463,16 @@ def main(args):
         # checkpoint_path = os.path.join(args.output_dir, "ckpt", "weights.{epoch:02d}-{loss:.2f}")
         checkpoint_dir = os.path.join(args.output_dir, "ckpt")
         model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=os.path.join(checkpoint_dir, "weights.{epoch:02d}"), save_weights_only=True, save_freq="epoch")
+        log_dir = os.path.join(args.output_dir, "log")
+        tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
         model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size, drop_remainder=True), 
                   epochs=args.num_train_epochs,
                   batch_size=args.train_batch_size,
                   # callbacks=[backup_restore_callback],
-                  callbacks=[model_checkpoint_callback],
+                  callbacks=[
+                    model_checkpoint_callback,
+                    tensorboard_callback,
+                ],
             )
         model.save_weights(os.path.join(checkpoint_dir, "weights.final"))
     if args.do_eval:
@@ -1506,7 +1489,7 @@ def main(args):
             use_tpu=False,
             #use_one_hot_embeddings=args.use_tpu)
             use_one_hot_embeddings=False)
-        model.load_weights(os.path.join(checkpoint_dir, "weights.final"))
+        model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
         eval_examples = processor.get_dev_examples(args.data_dir)
         num_actual_eval_examples = len(eval_examples)
 
@@ -1557,8 +1540,8 @@ def main(args):
         loss_weights = {"multi_head_selection": 1.0, "sequence_clf": 1.0}
         metrics = {
             "multi_head_selection": [
-                # tf.keras.metrics.BinaryCrossentropy(name='loss', dtype=None, from_logits=True, label_smoothing=0),
-                # tf.keras.metrics.MeanAbsoluteError(),
+                # tf.keras.metrics.Precision(thresholds=0, name="micro_precision"), # Applied on logits
+                # tf.keras.metrics.Recall(thresholds=0, name="micro_recall"), # Applied on logits
         ],
             "sequence_clf": [],
         }
