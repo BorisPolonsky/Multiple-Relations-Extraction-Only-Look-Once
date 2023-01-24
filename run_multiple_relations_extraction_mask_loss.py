@@ -1026,18 +1026,19 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        return {"loss": loss}
+        # return {"loss": loss}
         #return {"loss": loss, "multi_head_selection_loss": multi_head_selection_loss, "seq_clf_loss": seq_clf_loss}
         # Compute our own metrics
-        self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self.compiled_metrics.update_state(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
+
         # Collect metrics to return
         return_metrics = {}
         for metric in self.metrics:
             result = metric.result()
-        if isinstance(result, dict):
-            return_metrics.update(result)
-        else:
-            return_metrics[metric.name] = result
+            if isinstance(result, dict):
+                return_metrics.update(result)
+            else:
+                return_metrics[metric.name] = result
         return return_metrics
 
         loss_tracker.update_state(loss)
@@ -1104,14 +1105,14 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
         loss = self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
 
-        # self.compiled_metrics.update_state(y, y_pred, sample_weight)
+        self.compiled_metrics.update_state(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
         # Collect metrics to return
         return_metrics = {}
         # TODO: do it in compiled_loss
-        return_metrics["loss"] = loss
-        return_metrics["predicate_head_select_loss"] = self.loss["multi_head_selection"](y_true=predicate_matrix, y_pred=out["multi_head_selection"])
-        return_metrics["eval_token_label_loss"] = self.loss["sequence_clf"](y_true=token_label_ids, y_pred=out["sequence_clf"])
-        return return_metrics
+        # return_metrics["loss"] = loss
+        # return_metrics["predicate_head_select_loss"] = self.loss["multi_head_selection"](y_true=predicate_matrix, y_pred=out["multi_head_selection"])
+        # return_metrics["eval_token_label_loss"] = self.loss["sequence_clf"](y_true=token_label_ids, y_pred=out["sequence_clf"])
+        # return return_metrics
         for metric in self.metrics:
             result = metric.result()
             if isinstance(result, dict):
@@ -1481,16 +1482,16 @@ def main(args):
         # Introduced in tf2.10
         # ckpt_backup_dir = os.path.join(args.output_dir, "backup")
         # backup_restore_callback = tf.keras.callbacks.BackupAndRestore(backup_dir=ckpt_backup_dir)
-        # checkpoint_dir = os.path.join(args.output_dir, "ckpt", "weights.{epoch:02d}-{loss:.2f}")
-        checkpoint_dir = os.path.join(args.output_dir, "ckpt", "weights.{epoch:02d}")
-        model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_dir, save_weights_only=True, save_freq="epoch")
+        # checkpoint_path = os.path.join(args.output_dir, "ckpt", "weights.{epoch:02d}-{loss:.2f}")
+        checkpoint_dir = os.path.join(args.output_dir, "ckpt")
+        model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=os.path.join(checkpoint_dir, "weights.{epoch:02d}"), save_weights_only=True, save_freq="epoch")
         model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size, drop_remainder=True), 
                   epochs=args.num_train_epochs,
                   batch_size=args.train_batch_size,
                   # callbacks=[backup_restore_callback],
                   callbacks=[model_checkpoint_callback],
             )
-        model.save_weights(args.output_dir)
+        model.save_weights(os.path.join(checkpoint_dir, "weights.final"))
     if args.do_eval:
         model = TransformerMultiRelationExtrationModel.model_builder(
             bert_config=bert_config,
@@ -1505,7 +1506,7 @@ def main(args):
             use_tpu=False,
             #use_one_hot_embeddings=args.use_tpu)
             use_one_hot_embeddings=False)
-        model.load_weights(args.output_dir)
+        model.load_weights(os.path.join(checkpoint_dir, "weights.final"))
         eval_examples = processor.get_dev_examples(args.data_dir)
         num_actual_eval_examples = len(eval_examples)
 
@@ -1553,9 +1554,17 @@ def main(args):
             #"multi_head_selection": tf.keras.losses.BinaryFocalCrossentropy(apply_class_balancing=False, alpha=0.25, gamma=2.0, from_logits=True, label_smoothing=0.0),
             "sequence_clf": tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         }
-        loss_weights={"multi_head_selection": 1.0, "sequence_clf": 1.0}
-        model.compile(loss=loss,
-                      loss_weights=loss_weights) # can also use any keras loss fn
+        loss_weights = {"multi_head_selection": 1.0, "sequence_clf": 1.0}
+        metrics = {
+            "multi_head_selection": [
+                # tf.keras.metrics.BinaryCrossentropy(name='loss', dtype=None, from_logits=True, label_smoothing=0),
+                # tf.keras.metrics.MeanAbsoluteError(),
+        ],
+            "sequence_clf": [],
+        }
+        model.compile(loss=loss,  # can also use any keras loss fn
+                      loss_weights=loss_weights,
+                      metrics=metrics)
         # https://www.tensorflow.org/guide/keras/train_and_evaluate#passing_data_to_multi-input_multi-output_models
         # tf.keras.utils.plot_model(model, "multi_input_and_output_model.png", show_shapes=True)
         eval_result = model.evaluate(eval_dataset.batch(args.eval_batch_size, drop_remainder=True), batch_size=args.eval_batch_size, return_dict=True)
