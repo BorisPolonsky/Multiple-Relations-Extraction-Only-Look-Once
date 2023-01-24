@@ -1505,9 +1505,10 @@ def main(args):
             use_tpu=False,
             #use_one_hot_embeddings=args.use_tpu)
             use_one_hot_embeddings=False)
+        model.load_weights(args.output_dir)
         eval_examples = processor.get_dev_examples(args.data_dir)
         num_actual_eval_examples = len(eval_examples)
-        model.load_weights(args.output_dir)
+
         """
         if args.use_tpu:
             # TPU requires a fixed batch size for all batches, therefore the number
@@ -1567,6 +1568,21 @@ def main(args):
                 writer.write("%s = %s\n" % (key, str(eval_result[key])))
 
     if args.do_predict:
+        model = TransformerMultiRelationExtrationModel.model_builder(
+        bert_config=bert_config,
+        num_token_labels=num_token_labels,
+        num_predicate_labels=num_predicate_labels,
+        #init_checkpoint=args.init_checkpoint,
+        init_checkpoint=None,
+        learning_rate=args.learning_rate,
+        num_train_steps=num_train_steps,
+        num_warmup_steps=num_warmup_steps,
+        #use_tpu=args.use_tpu,
+        use_tpu=False,
+        #use_one_hot_embeddings=args.use_tpu)
+        use_one_hot_embeddings=False)
+        model.load_weights(args.output_dir)
+
         predict_examples = processor.get_test_examples(args.data_dir)
         num_actual_predict_examples = len(predict_examples)
         """
@@ -1579,10 +1595,11 @@ def main(args):
                 predict_examples.append(PaddingInputExample())
         """
         predict_file = os.path.join(args.output_dir, "predict.tf_record")
+        """
         file_based_convert_examples_to_features(predict_examples, token_label_list, predicate_label_list,
                                                 args.max_seq_length, tokenizer,
                                                 predict_file)
-
+        """
         predict_dataset = read_serialized_dataset(
         input_file=predict_file,
         seq_length=args.max_seq_length,
@@ -1593,14 +1610,16 @@ def main(args):
                         len(predict_examples) - num_actual_predict_examples)
         logger.info("  Batch size = %d", args.predict_batch_size)
 
-        predict_drop_remainder = True if args.use_tpu else False
-        predict_input_fn = file_based_input_fn_builder(
-            input_file=predict_file,
-            seq_length=args.max_seq_length,
-            num_predicate_label=len(predicate_label_list),
-            is_training=False,
-            drop_remainder=predict_drop_remainder)
-        result = estimator.predict(input_fn=predict_input_fn)
+        # predict_drop_remainder = True if args.use_tpu else False
+        # result = model.predict(predict_dataset.take(10).batch(args.predict_batch_size, drop_remainder=True), batch_size=args.predict_batch_size) # OOM
+
+        def predict_iter(model, dataset, batch_size, drop_remainder):
+            for batch_input in dataset.batch(batch_size, drop_remainder=drop_remainder):
+                x, y, is_real_example = batch_input
+                out = model.predict(x)
+                sequence_clf_logits, multi_head_selection = out["sequence_clf"], out["multi_head_selection"]
+                for sequence_clf_logits_,  multi_head_selection_ in zip(sequence_clf_logits, multi_head_selection):
+                    yield {"sequence_clf_logits": sequence_clf_logits_, "multi_head_selection_logits": multi_head_selection_}
         token_label_output_predict_file = os.path.join(args.output_dir, "token_label_predictions.txt")
         predicate_output_predict_file = os.path.join(args.output_dir, "predicate_head_predictions.txt")
         predicate_output_predict_id_file = os.path.join(args.output_dir, "predicate_head_predictions_id.txt")
@@ -1611,18 +1630,17 @@ def main(args):
             open(predicate_head_probabilities_file, "w", encoding='utf-8') as predicate_head_probabilities_writer:
             num_written_lines = 0
             logger.info("***** token_label predict and predicate labeling results *****")
-            for (i, prediction) in enumerate(result):
-                token_label_prediction = prediction["token_label_predictions"]
-                predicate_head_predictions = prediction["predicate_head_predictions"]
-                predicate_head_probabilities = prediction["predicate_head_probabilities"]
+
+            for (i, prediction) in enumerate(predict_iter(model, predict_dataset, batch_size=args.predict_batch_size, drop_remainder=True)):
+                token_label_prediction = prediction["sequence_clf_logits"].argmax(axis=-1)
+                positive_triplets = np.argwhere(prediction["multi_head_selection_logits"] > 0)  # Logits >0 <==> sigmoid(Logits) > 0.5
                 if i >= num_actual_predict_examples:
                     break
                 token_labels = [token_label_id2label[id_] for id_ in token_label_prediction]
                 token_label_output_line = " ".join(token_labels) + "\n"
                 token_label_writer.write(token_label_output_line)
-                predicate_head_predictions_flatten = predicate_head_predictions.flatten()
+                # predicate_head_predictions_flatten = predicate_head_predictions.flatten()
                 # predicate_head_predictions_line = " ".join(predicate_head_prediction)
-                positive_triplets = np.argwhere(predicate_head_probabilities > 0.5)
 
                 # Re-do input feature conversion to restore model input
                 current_input_feature = convert_single_example(i, predict_examples[i], token_label_list, predicate_label_list,
@@ -1647,9 +1665,9 @@ def main(args):
                 predicate_head_predictions_line = " ".join("{}-[{}]->{}".format(*spo_triplet) for spo_triplet in human_readable_triplets) + "\n"
                 predicate_head_predictions_writer.write(predicate_head_predictions_line)
 
-                predicate_head_predictions_id_line = " ".join(
-                    str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
-                predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
+                # predicate_head_predictions_id_line = " ".join(
+                #     str(id_) for id_ in predicate_head_predictions_flatten) + "\n"
+                # predicate_head_predictions_id_writer.write(predicate_head_predictions_id_line)
 
                 # predicate_head_probabilities_flatten = predicate_head_probabilities.flatten()
                 # predicate_head_probabilities_line = " ".join(str(prob) for prob in predicate_head_probabilities_flatten) + "\n"
