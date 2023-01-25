@@ -1113,8 +1113,10 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
         # Updates stateful loss metrics.
         # self.compiled_loss(y, y_pred, sample_weight, regularization_losses=self.losses)
-        self.compiled_loss(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
-        self.compiled_metrics.update_state(y_true={"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}, y_pred=out, sample_weight=sample_weight)
+        y_true = {"sequence_clf": token_label_ids, "multi_head_selection": predicate_matrix}
+        y_pred = out
+        self.compiled_loss(y_true=y_true, y_pred=y_pred, sample_weight=sample_weight)
+        self.compiled_metrics.update_state(y_true=y_true, y_pred=out, sample_weight=sample_weight)
         # Collect metrics to return
         return_metrics = {}
         for metric in self.metrics:
@@ -1445,20 +1447,9 @@ def main(args):
             use_tpu=False,
             #use_one_hot_embeddings=args.use_tpu)
             use_one_hot_embeddings=False)
-        """
-        # If TPU is not available, this will fall back to normal Estimator on CPU
-        # or GPU.
-        estimator = tf.contrib.tpu.TPUEstimator(
-            use_tpu=args.use_tpu,
-            model_fn=model_fn,
-            config=run_config,
-            train_batch_size=args.train_batch_size,
-            eval_batch_size=args.eval_batch_size,
-            predict_batch_size=args.predict_batch_size)
-        """
         train_file = os.path.join(args.output_dir, "train.tf_record")
-        #file_based_convert_examples_to_features(
-        #    train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
+        file_based_convert_examples_to_features(
+            train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
         logger.info("***** Running training *****")
         train_dataset = read_serialized_dataset(
             input_file=train_file,
@@ -1573,6 +1564,7 @@ def main(args):
                       loss_weights=loss_weights,
                       metrics=metrics)
         # https://www.tensorflow.org/guide/keras/train_and_evaluate#passing_data_to_multi-input_multi-output_models
+        # model.build({"input_ids": tf.TensorShape([None, args.max_seq_length]), "attention_mask": tf.TensorShape([None, args.max_seq_length]), "token_types_ids": tf.TensorShape([None, args.max_seq_length])})
         # tf.keras.utils.plot_model(model, "multi_input_and_output_model.png", show_shapes=True)
         eval_result = model.evaluate(eval_dataset.batch(args.eval_batch_size, drop_remainder=True), batch_size=args.eval_batch_size, return_dict=True)
 
@@ -1611,11 +1603,9 @@ def main(args):
                 predict_examples.append(PaddingInputExample())
         """
         predict_file = os.path.join(args.output_dir, "predict.tf_record")
-        """
         file_based_convert_examples_to_features(predict_examples, token_label_list, predicate_label_list,
                                                 args.max_seq_length, tokenizer,
                                                 predict_file)
-        """
         predict_dataset = read_serialized_dataset(
         input_file = predict_file,
         seq_length = args.max_seq_length,
