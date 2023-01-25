@@ -848,8 +848,9 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
 
     def build(self, input_shapes):
         # Mananually set _build_input_shape for serving purpose and avoid calling tf.keras.layers.Layer.build as it accepcts float input only
-        self._build_input_shape = input_shapes
-        # super().build(*args, **kwargs)
+        # Refer to tf.keras.layers.Layer.build(self, input_shape)
+        # self._build_input_shape = input_shapes
+        super(tf.keras.Model, self).build(input_shapes)
 
 
 
