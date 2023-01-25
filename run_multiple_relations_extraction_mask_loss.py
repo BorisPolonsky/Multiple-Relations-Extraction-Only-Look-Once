@@ -671,32 +671,7 @@ class MultiHeadSelection(tf.keras.layers.Layer):
 
         self.built = False
 
-    def __call__(self, inputs):
-        # Create variables on first call.
-        if not self.built:
-            self.v = self.add_weight("v", shape=[self.hidden_size, self.output_size], initializer="glorot_uniform", dtype=self.dtype, trainable=True)
-            self.b_s = self.add_weight("b_s", shape=[self.hidden_size], initializer="zero", dtype=self.dtype, trainable=True)
-            self.bert_sequence_length = inputs.shape[-2]
-            encode_input_hidden_size = inputs.shape[-1]
-            self.u_a = self.add_weight("u_a",
-             shape=[encode_input_hidden_size, self.hidden_size],
-            #initializer=self.kernel_initializer,
-            #regularizer=self.kernel_regularizer,
-            #constraint=self.kernel_constraint,
-            # dtype=self.dtype,
-            dtype=self.dtype,
-            trainable=True)
-            self.w_a = self.add_weight("w_a",
-             shape=[encode_input_hidden_size, self.hidden_size],
-            #initializer=self.kernel_initializer,
-            #regularizer=self.kernel_regularizer,
-            #constraint=self.kernel_constraint,
-            # dtype=self.dtype,
-            dtype=self.dtype,
-            trainable=True)
-            #self.u_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
-            #self.w_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
-            self.built = True
+    def call(self, inputs):
         # shape [batch_size, sequence_length, sequence_length, output_size]
         predicate_score_matrix = self.get_head_selection_scores(inputs)
         return predicate_score_matrix
@@ -750,6 +725,32 @@ class MultiHeadSelection(tf.keras.layers.Layer):
         return g
 
     def build(self, input_shape):
+        # Create variables on first call.
+        if not self.built:
+            self.v = self.add_weight("v", shape=[self.hidden_size, self.output_size], initializer="glorot_uniform", dtype=self.dtype, trainable=True)
+            self.b_s = self.add_weight("b_s", shape=[self.hidden_size], initializer="zero", dtype=self.dtype, trainable=True)
+            self.bert_sequence_length = input_shape[-2]
+            encode_input_hidden_size = input_shape[-1]
+            self.u_a = self.add_weight("u_a",
+             shape=[encode_input_hidden_size, self.hidden_size],
+            #initializer=self.kernel_initializer,
+            #regularizer=self.kernel_regularizer,
+            #constraint=self.kernel_constraint,
+            # dtype=self.dtype,
+            dtype=self.dtype,
+            trainable=True)
+            self.w_a = self.add_weight("w_a",
+             shape=[encode_input_hidden_size, self.hidden_size],
+            #initializer=self.kernel_initializer,
+            #regularizer=self.kernel_regularizer,
+            #constraint=self.kernel_constraint,
+            # dtype=self.dtype,
+            dtype=self.dtype,
+            trainable=True)
+            #self.u_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
+            #self.w_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
+            self.built = True
+        return
         dtype = tf.as_dtype(self.dtype or backend.floatx())
         if not (dtype.is_floating or dtype.is_complex):
             raise TypeError(
@@ -847,6 +848,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         # return sequence_clf_logits, predicate_matrix_score
 
     def build(self, input_shapes):
+        # Mananually set _build_input_shape for serving purpose and avoid calling tf.keras.layers.Layer.build as it accepcts float input only
         self._build_input_shape = input_shapes
         # super().build(*args, **kwargs)
 
@@ -1755,29 +1757,6 @@ def main(args):
 
     if args.do_export:
         export_dir = os.path.join(args.output_dir, "export")
-        """
-        if saved_model:
-            if signatures is None:
-                if any(spec.dtype == tf.int32 for spec in self.serving.input_signature[0].values()):
-                    int64_spec = {
-                        key: tf.TensorSpec(
-                            shape=spec.shape, dtype=tf.int64 if spec.dtype == tf.int32 else spec.dtype, name=spec.name
-                        )
-                        for key, spec in self.serving.input_signature[0].items()
-                    }
-                    int64_serving = tf.function(self.eager_serving, input_signature=[int64_spec])
-                    signatures = {"serving_default": self.serving, "int64_serving": int64_serving}
-                else:
-                    signatures = self.serving
-            saved_model_dir = os.path.join(save_directory, "saved_model", str(version))
-            self.save(saved_model_dir, include_optimizer=False, signatures=signatures)
-            logger.info(f"Saved model created in {saved_model_dir}")
-
-        model = transformers.TFAutoModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
-
-        tf.saved_model.save(model, export_dir)
-        # model.save_pretrained(export_dir, saved_model=True)
-        """
         model = TransformerMultiRelationExtrationModel.model_builder(
         bert_config=bert_config,
         num_token_labels=num_token_labels,
@@ -1792,45 +1771,8 @@ def main(args):
         #use_one_hot_embeddings=args.use_tpu)
         use_one_hot_embeddings=False)
         model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
+        model.build({"input_ids": tf.TensorShape([None, args.max_seq_length]), "attention_mask": tf.TensorShape([None, args.max_seq_length]), "token_types_ids": tf.TensorShape([None, args.max_seq_length])})
 
-        predict_dataset = read_serialized_dataset(
-        input_file = os.path.join(args.output_dir, "predict.tf_record"),
-        seq_length = args.max_seq_length,
-        num_predicate_label=len(predicate_label_list))
-
-        for x, y, is_real_example in predict_dataset.batch(5).take(1):
-            pass
-        model(x)
-        # model.compute_output_shape(input_shape=(None, 128))
-        #model.predict(x)
-        #model.summary()
-        """
-        @tf.function(input_signature=[
-            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="input_ids"),
-            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="attention_mask"),
-            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="token_type_ids")])
-        def serving_default(input_ids, attention_mask, token_type_ids):
-            inputs = {"input_ids": input_ids, "attention_mask": attention_mask, "token_type_ids": token_type_ids}
-            out = model(inputs)
-            sequence_clf_logits = out["sequence_clf"]
-            predicate_matrix_score = out["multi_head_selection"]
-            token_label_predictions = tf.argmax(sequence_clf_logits, axis=-1)
-            predicate_head_probabilities = tf.sigmoid(predicate_matrix_score)
-            return {"token_label_predictions": token_label_predictions, "predicate_head_probabilities": predicate_head_probabilities}
-
-        tf.saved_model.save(
-            model, export_dir, signatures={
-        tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: serving_default})
-        """
-        model.save(export_dir, save_format="tf", signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
-            {
-                "input_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="input_ids"),
-                "attention_mask": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="attention_mask"),
-                "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
-            }
-        ])}, include_optimizer=False)
-
-        """
         tf.saved_model.save(model, export_dir, signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
             {
                 "input_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="input_ids"),
@@ -1838,48 +1780,21 @@ def main(args):
                 "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
             }
         ])})
-        """
         loaded = tf.saved_model.load(export_dir)
         infer = loaded.signatures["serving_default"]
         print(infer.structured_input_signature)
-        print(infer(input_ids=x["input_ids"], attention_mask=x["attention_mask"], token_type_ids=x["token_type_ids"]))
-        """
-        default_signature = (
-            tf.saved_model.signature_def_utils.build_signature_def(
-                inputs={
-                    "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
-                    "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
-                    "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
-                },
-                outputs={
-                    "token_label_logits": tf.saved_model.utils.build_tensor_info(token_label_logits),
-                    "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
-                },
-                method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
-        prediction_signature = (
-            tf.saved_model.signature_def_utils.build_signature_def(
-                inputs={
-                    "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
-                    "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
-                    "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
-                },
-                outputs={
-                    "token_label_predictions": tf.saved_model.utils.build_tensor_info(token_label_predictions),
-                    "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
-                },
-                method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
+        
+        predict_dataset = read_serialized_dataset(
+            input_file = os.path.join(args.output_dir, "predict.tf_record"),
+            seq_length = args.max_seq_length,
+            num_predicate_label=len(predicate_label_list))
 
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            builder.add_meta_graph_and_variables(sess, [tf.saved_model.tag_constants.SERVING],
-                                                    signature_def_map={
-                                                        tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: default_signature,
-                                                        "predict": prediction_signature
-                                                    },
-                                                    main_op=tf.tables_initializer(),
-                                                    strip_default_attrs=True)
-            builder.save()
-        """
+        for x, y, is_real_example in predict_dataset.batch(5).take(1):
+            pass
+        # model(x)
+        
+        print(infer(input_ids=x["input_ids"], attention_mask=x["attention_mask"], token_type_ids=x["token_type_ids"]))
+
 
 if __name__ == "__main__":
     print(argparser)
