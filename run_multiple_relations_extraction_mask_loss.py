@@ -669,11 +669,11 @@ class MultiHeadSelection(tf.keras.layers.Layer):
         self.hidden_size = hidden_size
         self.output_size = output_size
 
-        self.is_built = False
+        self.built = False
 
     def __call__(self, inputs):
         # Create variables on first call.
-        if not self.is_built:
+        if not self.built:
             self.v = self.add_weight("v", shape=[self.hidden_size, self.output_size], initializer="glorot_uniform", dtype=self.dtype, trainable=True)
             self.b_s = self.add_weight("b_s", shape=[self.hidden_size], initializer="zero", dtype=self.dtype, trainable=True)
             self.bert_sequence_length = inputs.shape[-2]
@@ -696,7 +696,7 @@ class MultiHeadSelection(tf.keras.layers.Layer):
             trainable=True)
             #self.u_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
             #self.w_a = tf.Variable(shape=[encode_input_hidden_size, self.hidden_size], dtype=tf.float32)
-            self.is_built = True
+            self.built = True
         # shape [batch_size, sequence_length, sequence_length, output_size]
         predicate_score_matrix = self.get_head_selection_scores(inputs)
         return predicate_score_matrix
@@ -795,17 +795,36 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
     def __init__(self, transformer_model, multi_head_selection_output_size, seq_clf_output_size) -> None:
         super().__init__()
         self.transformer_model = transformer_model
-        self.sequence_clf = tf.keras.layers.Dense(seq_clf_output_size, activation=None, use_bias=True, name="cequence_clf1")
-        self.multi_head_section = MultiHeadSelection(hidden_size=100, output_size=multi_head_selection_output_size, name="multi_head_selection1")
+        self.sequence_clf = tf.keras.layers.Dense(seq_clf_output_size, activation=None, use_bias=True, name="sequence_clf")
+        self.multi_head_selection = MultiHeadSelection(hidden_size=100, output_size=multi_head_selection_output_size, name="multi_head_selection")
         self.multi_head_selection_output_size = multi_head_selection_output_size
         self.seq_clf_output_size = seq_clf_output_size
         self.built = False
 
-    #@tf.function(input_signature=[tf.TensorSpec(shape=[], dtype=tf.string)])
-    #def serve(self, input_ids, input_mask, segment_ids)
+    """
+    @tf.function(
+        input_signature=[
+            {
+                "input_ids": tf.TensorSpec((None, None), tf.int32, name="input_ids"),
+                "attention_mask": tf.TensorSpec((None, None), tf.int32, name="attention_mask"),
+                "token_type_ids": tf.TensorSpec((None, None), tf.int32, name="token_type_ids"),
+            }
+        ]
+    )
+    def serving(self, inputs):
+        out = self(inputs, training=False)
+        return out
+    """
+
+    def eager_serving(self, inputs):
+        out = self(inputs, training=False)
+        return out
+
+    def compute_output_shape(self, input_shape):
+        super().compute_output_shape(input_shape)
 
     # def __call__(self, input_ids, attention_mask, token_type_ids, training=False):
-    def __call__(self, inputs, training=False):
+    def call(self, inputs, training=False):
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         token_type_ids = inputs["token_type_ids"]
@@ -822,10 +841,14 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         if training:
             sequence_encode_output = tf.nn.dropout(sequence_encode_output, rate=0.1)
         # [batch_size, sequence_length, num_relation]
-        predicate_matrix_score = self.multi_head_section(sequence_encode_output)
+        predicate_matrix_score = self.multi_head_selection(sequence_encode_output)
         sequence_clf_logits = self.sequence_clf(sequence_encode_output)
         return {"sequence_clf": sequence_clf_logits, "multi_head_selection": predicate_matrix_score}
         # return sequence_clf_logits, predicate_matrix_score
+
+    def build(self, input_shapes):
+        self._build_input_shape = input_shapes
+        # super().build(*args, **kwargs)
 
 
 
@@ -1063,6 +1086,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
         values of the `Model`'s metrics are returned.
         """
+        super().test_step(data)
         x, y, is_real_example = data
 
 
@@ -1406,32 +1430,30 @@ def main(args):
             len(train_examples) / args.train_batch_size * args.num_train_epochs)
         num_warmup_steps = int(num_train_steps * args.warmup_proportion)
     
-    model = TransformerMultiRelationExtrationModel.model_builder(
-        bert_config=bert_config,
-        num_token_labels=num_token_labels,
-        num_predicate_labels=num_predicate_labels,
-        #init_checkpoint=args.init_checkpoint,
-        init_checkpoint=None,
-        learning_rate=args.learning_rate,
-        num_train_steps=num_train_steps,
-        num_warmup_steps=num_warmup_steps,
-        #use_tpu=args.use_tpu,
-        use_tpu=False,
-        #use_one_hot_embeddings=args.use_tpu)
-        use_one_hot_embeddings=False)
-    """
-    # If TPU is not available, this will fall back to normal Estimator on CPU
-    # or GPU.
-    estimator = tf.contrib.tpu.TPUEstimator(
-        use_tpu=args.use_tpu,
-        model_fn=model_fn,
-        config=run_config,
-        train_batch_size=args.train_batch_size,
-        eval_batch_size=args.eval_batch_size,
-        predict_batch_size=args.predict_batch_size)
-    """
-
-    if args.do_train:
+        model = TransformerMultiRelationExtrationModel.model_builder(
+            bert_config=bert_config,
+            num_token_labels=num_token_labels,
+            num_predicate_labels=num_predicate_labels,
+            #init_checkpoint=args.init_checkpoint,
+            init_checkpoint=None,
+            learning_rate=args.learning_rate,
+            num_train_steps=num_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            #use_tpu=args.use_tpu,
+            use_tpu=False,
+            #use_one_hot_embeddings=args.use_tpu)
+            use_one_hot_embeddings=False)
+        """
+        # If TPU is not available, this will fall back to normal Estimator on CPU
+        # or GPU.
+        estimator = tf.contrib.tpu.TPUEstimator(
+            use_tpu=args.use_tpu,
+            model_fn=model_fn,
+            config=run_config,
+            train_batch_size=args.train_batch_size,
+            eval_batch_size=args.eval_batch_size,
+            predict_batch_size=args.predict_batch_size)
+        """
         train_file = os.path.join(args.output_dir, "train.tf_record")
         #file_based_convert_examples_to_features(
         #    train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
@@ -1573,7 +1595,7 @@ def main(args):
         use_tpu=False,
         #use_one_hot_embeddings=args.use_tpu)
         use_one_hot_embeddings=False)
-        model.load_weights(args.output_dir)
+        model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
 
         predict_examples = processor.get_test_examples(args.data_dir)
         num_actual_predict_examples = len(predict_examples)
@@ -1593,8 +1615,8 @@ def main(args):
                                                 predict_file)
         """
         predict_dataset = read_serialized_dataset(
-        input_file=predict_file,
-        seq_length=args.max_seq_length,
+        input_file = predict_file,
+        seq_length = args.max_seq_length,
         num_predicate_label=len(predicate_label_list))
         logger.info("***** Running prediction*****")
         logger.info("  Num examples = %d (%d actual, %d padding)",
@@ -1732,104 +1754,129 @@ def main(args):
                 print("{}-[{}]->{}".format(subject, predicate_label_id2label[id_], object_))
 
     if args.do_export:
-        builder = tf.saved_model.builder.SavedModelBuilder(os.path.join(args.output_dir, "export"))
-        with tf.Graph().as_default():
-            serialized_tf_examples = tf.placeholder(tf.string, name="tf_example")
-            seq_length = args.max_seq_length
-            name_to_features = {
-                "input_ids": tf.io.FixedLenFeature([seq_length], tf.int64),
-                "attention_mask": tf.io.FixedLenFeature([seq_length], tf.int64),
-                "token_type_ids": tf.io.FixedLenFeature([seq_length], tf.int64),
-                "token_label_ids": tf.io.FixedLenFeature([seq_length], tf.int64),
-                "predicate_matrix": tf.io.FixedLenFeature([seq_length, seq_length, num_predicate_labels], tf.float32),
-                "is_real_example": tf.io.FixedLenFeature([], tf.int64),
+        export_dir = os.path.join(args.output_dir, "export")
+        """
+        if saved_model:
+            if signatures is None:
+                if any(spec.dtype == tf.int32 for spec in self.serving.input_signature[0].values()):
+                    int64_spec = {
+                        key: tf.TensorSpec(
+                            shape=spec.shape, dtype=tf.int64 if spec.dtype == tf.int32 else spec.dtype, name=spec.name
+                        )
+                        for key, spec in self.serving.input_signature[0].items()
+                    }
+                    int64_serving = tf.function(self.eager_serving, input_signature=[int64_spec])
+                    signatures = {"serving_default": self.serving, "int64_serving": int64_serving}
+                else:
+                    signatures = self.serving
+            saved_model_dir = os.path.join(save_directory, "saved_model", str(version))
+            self.save(saved_model_dir, include_optimizer=False, signatures=signatures)
+            logger.info(f"Saved model created in {saved_model_dir}")
+
+        model = transformers.TFAutoModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
+
+        tf.saved_model.save(model, export_dir)
+        # model.save_pretrained(export_dir, saved_model=True)
+        """
+        model = TransformerMultiRelationExtrationModel.model_builder(
+        bert_config=bert_config,
+        num_token_labels=num_token_labels,
+        num_predicate_labels=num_predicate_labels,
+        #init_checkpoint=args.init_checkpoint,
+        init_checkpoint=None,
+        learning_rate=args.learning_rate,
+        num_train_steps=num_train_steps,
+        num_warmup_steps=num_warmup_steps,
+        #use_tpu=args.use_tpu,
+        use_tpu=False,
+        #use_one_hot_embeddings=args.use_tpu)
+        use_one_hot_embeddings=False)
+        # model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
+
+        predict_dataset = read_serialized_dataset(
+        input_file = os.path.join(args.output_dir, "predict.tf_record"),
+        seq_length = args.max_seq_length,
+        num_predicate_label=len(predicate_label_list))
+
+        for x, y, is_real_example in predict_dataset.batch(5).take(1):
+            pass
+        # model(x)
+        # model.compute_output_shape(input_shape=(None, 128))
+        #model.predict(x)
+        #model.summary()
+        """
+        @tf.function(input_signature=[
+            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="input_ids"),
+            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="attention_mask"),
+            tf.TensorSpec(shape=[None, args.max_seq_length], dtype=tf.int32, name="token_type_ids")])
+        def serving_default(input_ids, attention_mask, token_type_ids):
+            inputs = {"input_ids": input_ids, "attention_mask": attention_mask, "token_type_ids": token_type_ids}
+            out = model(inputs)
+            sequence_clf_logits = out["sequence_clf"]
+            predicate_matrix_score = out["multi_head_selection"]
+            token_label_predictions = tf.argmax(sequence_clf_logits, axis=-1)
+            predicate_head_probabilities = tf.sigmoid(predicate_matrix_score)
+            return {"token_label_predictions": token_label_predictions, "predicate_head_probabilities": predicate_head_probabilities}
+
+        tf.saved_model.save(
+            model, export_dir, signatures={
+        tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: serving_default})
+        
+        model.save(export_dir, save_format="tf", signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
+            {
+                "input_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="input_ids"),
+                "attention_mask": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="attention_mask"),
+                "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
             }
-            # deserialize
-            tf_examples = tf.parse_example(serialized_tf_examples, name_to_features)
-            # Rename and optionally cast `dtype` of tensors
-            use_int32 = True
-            predicate_matrix = tf.identity(tf_examples["predicate_matrix"], name="predicate_matrix")
-            if use_int32:
-                input_ids = tf.cast(tf_examples["input_ids"], tf.int32, name="input_ids")
-                input_mask = tf.cast(tf_examples["attention_mask"], tf.int32, name="attention_mask")
-                segment_ids = tf.cast(tf_examples["token_type_ids"], tf.int32, name="token_type_ids")
-                token_label_ids = tf.cast(tf_examples["token_label_ids"], tf.int32, name="token_label_ids")
-            else:
-                input_ids = tf.identity(tf_examples["input_ids"], name="input_ids")
-                input_mask = tf.identity(tf_examples["attention_mask"], name="attention_mask")
-                segment_ids = tf.identity(tf_examples["token_type_ids"], name="token_type_ids")
-                token_label_ids = tf.identity(tf_examples["token_label_ids"], name="token_label_ids")
+        ])}, include_optimizer=False)
+        """
+        tf.saved_model.save(model, export_dir, signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
+            {
+                "input_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="input_ids"),
+                "attention_mask": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="attention_mask"),
+                "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
+            }
+        ])})
+        loaded = tf.saved_model.load(export_dir)
+        infer = loaded.signatures["serving_default"]
+        print(infer.structured_input_signature)
+        """
+        default_signature = (
+            tf.saved_model.signature_def_utils.build_signature_def(
+                inputs={
+                    "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
+                    "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
+                    "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
+                },
+                outputs={
+                    "token_label_logits": tf.saved_model.utils.build_tensor_info(token_label_logits),
+                    "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
+                },
+                method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
+        prediction_signature = (
+            tf.saved_model.signature_def_utils.build_signature_def(
+                inputs={
+                    "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
+                    "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
+                    "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
+                },
+                outputs={
+                    "token_label_predictions": tf.saved_model.utils.build_tensor_info(token_label_predictions),
+                    "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
+                },
+                method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
 
-            for name in sorted(tf_examples.keys()):
-                logger.info("  name = %s, shape = %s" % (name, tf_examples[name].shape))
-            use_one_hot_embeddings = args.use_tpu
-            is_training = False
-            (total_loss,
-             predicate_head_select_loss, predicate_head_probabilities, predicate_head_predictions,
-             token_label_loss, token_label_per_example_loss, token_label_logits,
-             token_label_predictions) = create_model(
-                bert_config, is_training, input_ids, input_mask, segment_ids,
-                token_label_ids, predicate_matrix, num_token_labels, num_predicate_labels,
-                use_one_hot_embeddings)
-
-            tvars = tf.trainable_variables()
-            logger.info("***** Loading Model to be Exported *****")
-            if tf.train.latest_checkpoint(args.output_dir):
-                init_checkpoint = args.output_dir
-            else:
-                logger.info("Could not find checkpoint specified in `output_dir`, "
-                                "loading model from `init_checkpoint`.")
-                init_checkpoint = args.init_checkpoint
-            (assignment_map, initialized_variable_names
-             ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
-            if args.use_tpu:
-                raise NotImplemented("Exporting model for TPU is not implemented/tested yet.")
-            else:
-                tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
-
-            logger.info("**** Trainable Variables ****")
-            for var in tvars:
-                init_string = ""
-                if var.name in initialized_variable_names:
-                    init_string = ", *INIT_FROM_CKPT*"
-                logger.info("  name = %s, shape = %s%s", var.name, var.shape,
-                                init_string)
-            default_signature = (
-                tf.saved_model.signature_def_utils.build_signature_def(
-                    inputs={
-                        "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
-                        "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
-                        "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
-                    },
-                    outputs={
-                        "token_label_logits": tf.saved_model.utils.build_tensor_info(token_label_logits),
-                        "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
-                    },
-                    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
-            prediction_signature = (
-                tf.saved_model.signature_def_utils.build_signature_def(
-                    inputs={
-                        "input_ids": tf.saved_model.utils.build_tensor_info(input_ids),
-                        "attention_mask": tf.saved_model.utils.build_tensor_info(input_mask),
-                        "token_type_ids": tf.saved_model.utils.build_tensor_info(segment_ids)
-                    },
-                    outputs={
-                        "token_label_predictions": tf.saved_model.utils.build_tensor_info(token_label_predictions),
-                        "predicate_head_probabilities": tf.saved_model.utils.build_tensor_info(predicate_head_probabilities),
-                    },
-                    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
-
-            with tf.Session() as sess:
-                sess.run(tf.global_variables_initializer())
-                builder.add_meta_graph_and_variables(sess, [tf.saved_model.tag_constants.SERVING],
-                                                     signature_def_map={
-                                                         tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: default_signature,
-                                                         "predict": prediction_signature
-                                                     },
-                                                     main_op=tf.tables_initializer(),
-                                                     strip_default_attrs=True)
-                builder.save()
-
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            builder.add_meta_graph_and_variables(sess, [tf.saved_model.tag_constants.SERVING],
+                                                    signature_def_map={
+                                                        tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: default_signature,
+                                                        "predict": prediction_signature
+                                                    },
+                                                    main_op=tf.tables_initializer(),
+                                                    strip_default_attrs=True)
+            builder.save()
+        """
 
 if __name__ == "__main__":
     print(argparser)
