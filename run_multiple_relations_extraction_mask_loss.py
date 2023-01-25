@@ -1791,7 +1791,7 @@ def main(args):
         use_tpu=False,
         #use_one_hot_embeddings=args.use_tpu)
         use_one_hot_embeddings=False)
-        # model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
+        model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
 
         predict_dataset = read_serialized_dataset(
         input_file = os.path.join(args.output_dir, "predict.tf_record"),
@@ -1800,7 +1800,7 @@ def main(args):
 
         for x, y, is_real_example in predict_dataset.batch(5).take(1):
             pass
-        # model(x)
+        model(x)
         # model.compute_output_shape(input_shape=(None, 128))
         #model.predict(x)
         #model.summary()
@@ -1821,7 +1821,7 @@ def main(args):
         tf.saved_model.save(
             model, export_dir, signatures={
         tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: serving_default})
-        
+        """
         model.save(export_dir, save_format="tf", signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
             {
                 "input_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="input_ids"),
@@ -1829,6 +1829,7 @@ def main(args):
                 "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
             }
         ])}, include_optimizer=False)
+
         """
         tf.saved_model.save(model, export_dir, signatures={tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY: tf.function(model.eager_serving, input_signature=[
             {
@@ -1837,9 +1838,11 @@ def main(args):
                 "token_type_ids": tf.TensorSpec((None, args.max_seq_length), tf.int32, name="token_type_ids"),
             }
         ])})
+        """
         loaded = tf.saved_model.load(export_dir)
         infer = loaded.signatures["serving_default"]
         print(infer.structured_input_signature)
+        print(infer(input_ids=x["input_ids"], attention_mask=x["attention_mask"], token_type_ids=x["token_type_ids"]))
         """
         default_signature = (
             tf.saved_model.signature_def_utils.build_signature_def(
