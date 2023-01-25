@@ -824,7 +824,6 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
     def compute_output_shape(self, input_shape):
         super().compute_output_shape(input_shape)
 
-    # def __call__(self, input_ids, attention_mask, token_type_ids, training=False):
     def call(self, inputs, training=False):
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
@@ -1088,7 +1087,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
         values of the `Model`'s metrics are returned.
         """
-        super().test_step(data)
+        # super().test_step(data)
         x, y, is_real_example = data
 
 
@@ -1108,7 +1107,7 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         # (the loss function is configured in `compile()`)
         # loss = self.compiled_loss(y, y_pred, regularization_losses=self.losses)
         # sequence_clf_logits, predicate_matrix_score = self(x, training=True)
-        out = self(x, training=True)
+        out = self(x, training=False)
         # TODO: Mask Loss
         sample_weight = {'sequence_clf': None, 'multi_head_selection': None}
         # Updates stateful loss metrics.
