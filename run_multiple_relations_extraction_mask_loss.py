@@ -22,26 +22,17 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())
 ## Required parameters
 argparser.add_argument("--data-dir", default=None, help="The input data dir. Should contain the .tsv files (or other data files) for the task.", required=True)
+argparser.add_argument("--task-name", default=None, help="The name of the task to train.", required=True)
+argparser.add_argument("--output-dir", default=None, help="The output directory where the model checkpoints will be written.", required=True)
 """
-args.DEFINE_string(
-    "bert_config_file", None,
-    "The config json file corresponding to the pre-trained BERT model. "
-    "This specifies the model architecture.")
-
 args.DEFINE_string("vocab_file", None,
                     "The vocabulary file that the BERT model was trained on.")
 """
-
-argparser.add_argument("--task-name", default=None, help="The name of the task to train.", required=True)
-argparser.add_argument("--output-dir", default=None, help="The output directory where the model checkpoints will be written.", required=True)
-
 ## Other parameters
+argparser.add_argument("--transformer-config", default=None, help='Specify transformer with model-name or path by calling `transformers.AutoConfig.from_pretrained`.')
+argparser.add_argument("--pretrained-transformer", default=None, help='Initialize with pretrained transformer model with name or path by calling `transformers.TFAutoModel.from_pretrained`.')
 
 """
-args.DEFINE_string(
-    "init_checkpoint", None,
-    "Initial checkpoint (usually from a pre-trained BERT model).")
-
 args.DEFINE_bool(
     "do_lower_case", True,
     "Whether to lower case the input text. Should be True for uncased "
@@ -853,15 +844,17 @@ class TransformerMultiRelationExtrationModel(tf.keras.Model):
         super(tf.keras.Model, self).build(input_shapes)
 
 
-
     @classmethod
-    def model_builder(cls, bert_config, num_token_labels, num_predicate_labels, init_checkpoint, learning_rate,
-                        num_train_steps, num_warmup_steps, use_tpu,
-                        use_one_hot_embeddings):
-        """Returns `model_fn` closure for TPUEstimator."""
-        model = transformers.TFAutoModel.from_pretrained(r'./BERT-PARAM/bert-base-chinese')
-        tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
-        model = TransformerMultiRelationExtrationModel(transformer_model=model, multi_head_selection_output_size=num_predicate_labels, seq_clf_output_size=num_token_labels)
+    def model_builder(cls, num_token_labels, num_predicate_labels, transformer_config=None, pretrained_transformer=None):
+        if pretrained_transformer is not None:
+            transformer_model = transformers.TFAutoModel.from_pretrained(pretrained_transformer)
+        elif transformer_config is not None:
+            # TODO: Fix problem where embeddings from fine-tuned checkpoint fail to load due to variable name divergence
+            transformer_model = transformers.TFAutoModel.from_config(transformers.AutoConfig.from_pretrained(transformer_config))
+        else:
+            raise ValueError("Either `transformer_config` or `pretrained_transformer` must be specified")
+        # tokenizer = transformers.AutoTokenizer.from_pretrained("bert-base-chinese")
+        model = TransformerMultiRelationExtrationModel(transformer_model=transformer_model, multi_head_selection_output_size=num_predicate_labels, seq_clf_output_size=num_token_labels)
         return model
         def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
 
@@ -1435,18 +1428,10 @@ def main(args):
         num_warmup_steps = int(num_train_steps * args.warmup_proportion)
     
         model = TransformerMultiRelationExtrationModel.model_builder(
-            bert_config=bert_config,
             num_token_labels=num_token_labels,
             num_predicate_labels=num_predicate_labels,
-            #init_checkpoint=args.init_checkpoint,
-            init_checkpoint=None,
-            learning_rate=args.learning_rate,
-            num_train_steps=num_train_steps,
-            num_warmup_steps=num_warmup_steps,
-            #use_tpu=args.use_tpu,
-            use_tpu=False,
-            #use_one_hot_embeddings=args.use_tpu)
-            use_one_hot_embeddings=False)
+            transformer_config=args.transformer_config,
+            pretrained_transformer=args.pretrained_transformer)
         train_file = os.path.join(args.output_dir, "train.tf_record")
         file_based_convert_examples_to_features(
             train_examples, token_label_list, predicate_label_list, args.max_seq_length, tokenizer, train_file)
@@ -1459,8 +1444,6 @@ def main(args):
         logger.info(f"  Num examples = {train_dataset.cardinality().numpy()}")
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info(f"  Num steps = {num_train_steps}")
-        # model.train_step(train_dataset.shuffle(1000).batch(args.train_batch_size).take(1))
-        #stimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
         optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
         loss = {
             "multi_head_selection": tf.keras.losses.BinaryCrossentropy(from_logits=True, label_smoothing=0.0),
@@ -1483,7 +1466,6 @@ def main(args):
         model.fit(train_dataset.shuffle(1000).batch(args.train_batch_size, drop_remainder=True), 
                   epochs=args.num_train_epochs,
                   batch_size=args.train_batch_size,
-                  # callbacks=[backup_restore_callback],
                   callbacks=[
                     model_checkpoint_callback,
                     tensorboard_callback,
@@ -1492,18 +1474,10 @@ def main(args):
         model.save_weights(os.path.join(checkpoint_dir, "weights.final"))
     if args.do_eval:
         model = TransformerMultiRelationExtrationModel.model_builder(
-            bert_config=bert_config,
             num_token_labels=num_token_labels,
             num_predicate_labels=num_predicate_labels,
-            #init_checkpoint=args.init_checkpoint,
-            init_checkpoint=None,
-            learning_rate=args.learning_rate,
-            num_train_steps=num_train_steps,
-            num_warmup_steps=num_warmup_steps,
-            #use_tpu=args.use_tpu,
-            use_tpu=False,
-            #use_one_hot_embeddings=args.use_tpu)
-            use_one_hot_embeddings=False)
+            transformer_config=args.transformer_config,
+            pretrained_transformer=args.pretrained_transformer)
         model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
         eval_examples = processor.get_dev_examples(args.data_dir)
         num_actual_eval_examples = len(eval_examples)
@@ -1577,18 +1551,10 @@ def main(args):
 
     if args.do_predict:
         model = TransformerMultiRelationExtrationModel.model_builder(
-        bert_config=bert_config,
-        num_token_labels=num_token_labels,
-        num_predicate_labels=num_predicate_labels,
-        #init_checkpoint=args.init_checkpoint,
-        init_checkpoint=None,
-        learning_rate=args.learning_rate,
-        num_train_steps=num_train_steps,
-        num_warmup_steps=num_warmup_steps,
-        #use_tpu=args.use_tpu,
-        use_tpu=False,
-        #use_one_hot_embeddings=args.use_tpu)
-        use_one_hot_embeddings=False)
+            num_token_labels=num_token_labels,
+            num_predicate_labels=num_predicate_labels,
+            transformer_config=args.transformer_config,
+            pretrained_transformer=args.pretrained_transformer)
         model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
 
         predict_examples = processor.get_test_examples(args.data_dir)
@@ -1748,18 +1714,10 @@ def main(args):
     if args.do_export:
         export_dir = os.path.join(args.output_dir, "export")
         model = TransformerMultiRelationExtrationModel.model_builder(
-        bert_config=bert_config,
-        num_token_labels=num_token_labels,
-        num_predicate_labels=num_predicate_labels,
-        #init_checkpoint=args.init_checkpoint,
-        init_checkpoint=None,
-        learning_rate=args.learning_rate,
-        num_train_steps=num_train_steps,
-        num_warmup_steps=num_warmup_steps,
-        #use_tpu=args.use_tpu,
-        use_tpu=False,
-        #use_one_hot_embeddings=args.use_tpu)
-        use_one_hot_embeddings=False)
+            num_token_labels=num_token_labels,
+            num_predicate_labels=num_predicate_labels,
+            transformer_config=args.transformer_config,
+            pretrained_transformer=args.pretrained_transformer)
         model.load_weights(os.path.join(args.output_dir, "ckpt", "weights.final"))
         model.build({"input_ids": tf.TensorShape([None, args.max_seq_length]), "attention_mask": tf.TensorShape([None, args.max_seq_length]), "token_types_ids": tf.TensorShape([None, args.max_seq_length])})
 
